@@ -20,3 +20,8 @@ ATTR_POLICY = "policy"
 ATTR_ENABLED = "enabled"
 ATTR_MINUTES = "minutes"
 CONF_PACK_COUNT = "pack_count"
+
+# 2026-09-29: pypowerwall-server support. Which backend the entry talks to is
+# detected from the shape of /health (see coordinator.detect_backend).
+BACKEND_PROXY = "proxy"  # jasonacox/pypowerwall proxy (form body, token field)
+BACKEND_SERVER = "server"  # jasonacox/pypowerwall-server (JSON body, Bearer token)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import json
 import logging
 import time
 from typing import Any
@@ -12,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -21,6 +23,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+from .const import BACKEND_PROXY, BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
 from .sensor_descriptions import observed_pack_count
 
 _LOGGER = logging.getLogger(__name__)
@@ -63,6 +66,56 @@ SLOW_POLL_KEYS = frozenset(
 )
 SLOW_POLL_EVERY = 10
 
+# ---------------------------------------------------------------- pypowerwall-server (2026-09-29)
+# GET endpoints only the pypowerwall proxy implements. pypowerwall-server has just
+# POST /control/{path} (a GET there is 405); it reports grid charging / grid export
+# in /api/operation instead, and has no max-backup control at all.
+PROXY_ONLY_KEYS = frozenset({"control_grid_charging", "control_grid_export", "control_max_backup"})
+
+# pypowerwall-server waits up to 10 s on its own cloud/local call before answering,
+# so a 10 s client timeout could report a slow-but-successful write as failed.
+SERVER_WRITE_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+# pypowerwall-server answers /api/operation from its poll cache (PW_CACHE_EXPIRE,
+# default 5 s): the refresh right after a write usually still sees the old value,
+# so schedule a second one once the server has re-polled the gateway.
+SERVER_SETTLE_SECONDS = 8
+
+
+def detect_backend(health: Any) -> str | None:
+    """Tell pypowerwall-server and the pypowerwall proxy apart by their /health payload.
+
+    proxy:  {"pypowerwall": "0.x.y Proxy tNN", "mode": ..., "transports": ...}
+    server: {"status": ..., "version": ..., "gateways": N, "gateway_ids": [...], ...}
+    """
+    if not isinstance(health, dict) or not health:
+        return None
+    if "gateway_ids" in health:
+        return BACKEND_SERVER
+    if "pypowerwall" in health:
+        return BACKEND_PROXY
+    return None
+
+
+def server_command_value(action: str, value: Any) -> Any:
+    """Convert a proxy-style command value to the JSON type pypowerwall-server validates.
+
+    The proxy takes every value as a form string; the server rejects anything but
+    a JSON bool for grid_charging and a JSON int for reserve (HTTP 400).
+    """
+    if action == "grid_charging":
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("true", "false"):
+            return text == "true"
+        raise ValueError(f"grid_charging expects true/false, got {value!r}")
+    if action == "reserve":
+        if isinstance(value, bool):
+            raise ValueError(f"reserve expects an integer, got {value!r}")
+        return int(value)
+    return str(value)
+
 
 class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls the pypowerwall proxy."""
@@ -91,6 +144,8 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._session = async_get_clientsession(hass)
         self._max_backup_minutes = int(max_backup_minutes)
         self._cycle = 0
+        self._backend: str | None = None  # 2026-09-29: BACKEND_PROXY / BACKEND_SERVER, None = not detected yet
+        self._settle_unsub: Any = None  # 2026-09-29: pending post-write refresh (pypowerwall-server)
         _LOGGER.debug(
             "Coordinator initialised: base_url=%s interval=%ss control=%s",
             self._base_url,
@@ -107,6 +162,22 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def has_control_secret(self) -> bool:
         """Return True if a control secret is configured."""
         return bool(self._control_secret)
+
+    # ------------------------------------------------------- backend (2026-09-29)
+    @property
+    def backend(self) -> str | None:
+        """BACKEND_PROXY or BACKEND_SERVER, None until /health has been seen."""
+        return self._backend
+
+    @property
+    def is_server(self) -> bool:
+        """True when talking to pypowerwall-server rather than the pypowerwall proxy."""
+        return self._backend == BACKEND_SERVER
+
+    @property
+    def supports_max_backup(self) -> bool:
+        """pypowerwall-server has no /control/max_backup (as of server 0.7.x)."""
+        return not self.is_server
 
     # ------------------------------------------------------- max backup duration
     @property
@@ -167,13 +238,32 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _due(self, key: str) -> bool:
         """Whether this endpoint should be fetched on this cycle."""
+        # 2026-09-29: pypowerwall-server has no GET /control/*; never poll (or send the token) there
+        if key in PROXY_ONLY_KEYS and self.is_server:
+            return False
         if key not in SLOW_POLL_KEYS or self._cycle % SLOW_POLL_EVERY == 0:
             return True
         # not due: only skip if we already have a value from an earlier cycle
         return self.data is None or key not in self.data
 
     async def _async_update_data(self) -> dict[str, Any]:
-        todo = [(key, path, required) for key, path, required in ENDPOINTS if self._due(key)]
+        # 2026-09-29: identify the backend before the first poll, so proxy-only
+        # endpoints (incl. the token-in-query GET /control/max_backup) never reach
+        # pypowerwall-server. /health is fetched first (still required) and reused below.
+        prefetched: dict[str, Any] = {}
+        if self._backend is None:
+            prefetched["health"] = await self._fetch("/health", True)
+            self._backend = detect_backend(prefetched["health"])
+            if self._backend is not None:
+                _LOGGER.debug("Backend at %s detected as %s", self._base_url, self._backend)
+        # [OLD 2026-09-29] replaced: skip endpoints already prefetched above. Delete when happy.
+        # todo = [(key, path, required) for key, path, required in ENDPOINTS if self._due(key)]
+        # [/OLD 2026-09-29]
+        todo = [
+            (key, path, required)
+            for key, path, required in ENDPOINTS
+            if key not in prefetched and self._due(key)
+        ]
         results = await asyncio.gather(
             *(self._fetch(self._path_for(path), required) for _key, path, required in todo)
         )
@@ -181,6 +271,7 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data: dict[str, Any] = {}
         fetched = {key: value for (key, _p, _r), value in zip(todo, results, strict=True)}
+        fetched.update(prefetched)  # 2026-09-29: /health fetched before the gather
         for key, _path, _required in ENDPOINTS:
             # slow-poll key not due this cycle -> carry the previous value
             value = fetched[key] if key in fetched else (self.data or {}).get(key)
@@ -197,6 +288,8 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._base_url,
             sum(1 for v in results if v is None),
         )
+        # 2026-09-29: keep following /health in case the host:port now runs the other backend
+        self._backend = detect_backend(data["health"]) or self._backend
         data["pack_count"] = self._sticky_pack_count(data)
         self._update_repairs(data)
         return data
@@ -282,6 +375,9 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._control_secret:
             _LOGGER.error("Control secret not configured - cannot send command")
             return False
+        # 2026-09-29: pypowerwall-server wants a JSON body and a Bearer token instead
+        if self.is_server:
+            return await self._send_command_server(path, value)
         url = f"{self._base_url}{path}"
         form_data = {"value": str(value), "token": self._control_secret}
         _LOGGER.debug("POST %s value=%s", url, value)
@@ -301,3 +397,85 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.error("POST %s failed: %s", url, err)
             return False
+
+    # ------------------------------------------------ pypowerwall-server writes (2026-09-29)
+    async def _send_command_server(self, path: str, value: Any) -> bool:
+        """POST a control command to pypowerwall-server.
+
+          curl -X POST -H "Authorization: Bearer SECRET" -H "Content-Type: application/json" \\
+               -d '{"value": 20}' http://host:port/control/reserve
+        """
+        action = path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if action == "max_backup":
+            _LOGGER.error("pypowerwall-server has no max backup control (%s is proxy-only)", path)
+            return False
+        try:
+            payload = {"value": server_command_value(action, value)}
+        except (TypeError, ValueError) as err:
+            _LOGGER.error("Not sending %s: %s", path, err)
+            return False
+        url = f"{self._base_url}{path}"
+        headers = {"Authorization": f"Bearer {self._control_secret}"}
+        _LOGGER.debug("POST %s json=%s (pypowerwall-server)", url, payload)
+        try:
+            async with self._session.post(
+                url, json=payload, headers=headers, timeout=SERVER_WRITE_TIMEOUT
+            ) as resp:
+                detail = _error_detail(await resp.text())
+                if resp.status in (401, 403):
+                    # 401 = wrong token, 403 = PW_CONTROL_SECRET not set on the server
+                    _LOGGER.error(
+                        "POST %s rejected (HTTP %s: %s): check PW_CONTROL_SECRET on pypowerwall-server",
+                        url,
+                        resp.status,
+                        detail,
+                    )
+                    return False
+                if resp.status >= 400:
+                    _LOGGER.error("POST %s failed (HTTP %s): %s", url, resp.status, detail)
+                    return False
+                if detail.startswith("error:"):
+                    _LOGGER.error("POST %s returned an error: %s", url, detail)
+                    return False
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error("POST %s failed: %s", url, err)
+            return False
+        self._schedule_settle_refresh()
+        return True
+
+    def _schedule_settle_refresh(self) -> None:
+        """Refresh again once pypowerwall-server has re-polled the gateway."""
+        if self._settle_unsub is not None:
+            self._settle_unsub()
+
+        async def _refresh(_now: Any) -> None:
+            self._settle_unsub = None
+            await self.async_request_refresh()
+
+        self._settle_unsub = async_call_later(self.hass, SERVER_SETTLE_SECONDS, _refresh)
+
+    async def async_shutdown(self) -> None:
+        """Cancel a pending post-write refresh, then shut down as usual."""
+        if self._settle_unsub is not None:
+            self._settle_unsub()
+            self._settle_unsub = None
+        await super().async_shutdown()
+
+
+def _error_detail(text: str) -> str:
+    """Short human-readable reason from a pypowerwall-server response body.
+
+    FastAPI errors are {"detail": ...}; a success body carrying {"error": ...}
+    is reported as "error: ..." so the caller can treat it as a failure.
+    """
+    try:
+        body = json.loads(text) if text else None
+    except ValueError:
+        return text[:300]
+    if isinstance(body, dict):
+        if "detail" in body:
+            return str(body["detail"])[:300]
+        if "error" in body:
+            return f"error: {body['error']}"[:300]
+        return ""
+    return text[:300]

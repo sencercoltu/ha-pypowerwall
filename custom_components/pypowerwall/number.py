@@ -21,11 +21,19 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data.coordinator
+    # [OLD 2026-09-29] replaced: the max backup duration is only useful where max backup
+    # exists; pypowerwall-server has no /control/max_backup. Delete this block when happy.
+    # if coordinator.has_control_secret:
+    #     async_add_entities([
+    #         PyPowerwallBackupReserve(coordinator, entry.entry_id),
+    #         PyPowerwallMaxBackupDuration(coordinator, entry.entry_id),
+    #     ])
+    # [/OLD 2026-09-29]
     if coordinator.has_control_secret:
-        async_add_entities([
-            PyPowerwallBackupReserve(coordinator, entry.entry_id),
-            PyPowerwallMaxBackupDuration(coordinator, entry.entry_id),
-        ])
+        entities: list[NumberEntity] = [PyPowerwallBackupReserve(coordinator, entry.entry_id)]
+        if coordinator.supports_max_backup:
+            entities.append(PyPowerwallMaxBackupDuration(coordinator, entry.entry_id))
+        async_add_entities(entities)
 
 
 class PyPowerwallBackupReserve(PyPowerwallEntity, NumberEntity):

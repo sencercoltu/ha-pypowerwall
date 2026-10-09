@@ -20,11 +20,19 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data.coordinator
+    # [OLD 2026-09-29] replaced: pypowerwall-server has no /control/max_backup, so the
+    # max backup switch is only created where it can work. Delete this block when happy.
+    # if coordinator.has_control_secret:
+    #     async_add_entities([
+    #         PyPowerwallGridCharging(coordinator, entry.entry_id),
+    #         PyPowerwallMaxBackup(coordinator, entry.entry_id),
+    #     ])
+    # [/OLD 2026-09-29]
     if coordinator.has_control_secret:
-        async_add_entities([
-            PyPowerwallGridCharging(coordinator, entry.entry_id),
-            PyPowerwallMaxBackup(coordinator, entry.entry_id),
-        ])
+        entities: list[SwitchEntity] = [PyPowerwallGridCharging(coordinator, entry.entry_id)]
+        if coordinator.supports_max_backup:
+            entities.append(PyPowerwallMaxBackup(coordinator, entry.entry_id))
+        async_add_entities(entities)
 
 
 class PyPowerwallGridCharging(PyPowerwallEntity, SwitchEntity):
@@ -44,6 +52,13 @@ class PyPowerwallGridCharging(PyPowerwallEntity, SwitchEntity):
             val = data.get("grid_charging")
             if val is not None:
                 return bool(val)
+        # [OLD 2026-09-29] replaced: fall back to /api/operation, where pypowerwall-server
+        # reports grid charging (it has no GET /control/grid_charging). Delete when happy.
+        # return None
+        # [/OLD 2026-09-29]
+        op = self.coordinator.data.get("operation")
+        if isinstance(op, dict) and isinstance(op.get("grid_charging"), bool):
+            return op["grid_charging"]
         return None
 
     async def async_turn_on(self, **kwargs) -> None:

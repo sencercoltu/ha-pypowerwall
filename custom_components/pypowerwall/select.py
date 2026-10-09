@@ -79,6 +79,13 @@ class PyPowerwallGridExport(PyPowerwallEntity, SelectEntity):
             mode = data.get("grid_export")
             if mode in GRID_EXPORT_MODES:
                 return mode
+        # [OLD 2026-09-29] replaced: fall back to /api/operation, where pypowerwall-server
+        # reports the export policy (it has no GET /control/grid_export). Delete when happy.
+        # return None
+        # [/OLD 2026-09-29]
+        op = self.coordinator.data.get("operation")
+        if isinstance(op, dict) and op.get("grid_export") in GRID_EXPORT_MODES:
+            return op["grid_export"]
         return None
 
     async def async_select_option(self, option: str) -> None:

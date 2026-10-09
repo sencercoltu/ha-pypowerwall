@@ -485,6 +485,9 @@
     },
     "no_control_secret": {
       "message": "Los controles están desactivados: configura el secreto de control (PW_CONTROL_SECRET) para esta entrada pypowerwall."
+    },
+    "max_backup_unsupported": {
+      "message": "El respaldo máximo no está disponible en pypowerwall-server; solo lo admite el proxy pypowerwall (transporte LAN v1r)."
     }
   }
 }

@@ -58,6 +58,12 @@ def _coordinator(hass: HomeAssistant, call: ServiceCall) -> PyPowerwallCoordinat
     return coordinator
 
 
+def _require_max_backup(coordinator: PyPowerwallCoordinator) -> None:
+    """2026-09-29: pypowerwall-server has no /control/max_backup."""
+    if not coordinator.supports_max_backup:
+        raise ServiceValidationError(translation_domain=DOMAIN, translation_key="max_backup_unsupported")
+
+
 async def _send(coordinator: PyPowerwallCoordinator, path: str, value, what: str) -> None:
     if not await coordinator.send_command(path, value):
         raise HomeAssistantError(f"pypowerwall proxy rejected {what}")
@@ -89,6 +95,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     async def start_max_backup(call: ServiceCall) -> None:
         c = _coordinator(hass, call)
+        _require_max_backup(c)  # 2026-09-29: pypowerwall-server support
         minutes = int(call.data.get(ATTR_MINUTES, c.max_backup_minutes))
         # A lingering (expired) event must be cancelled before scheduling a new one
         data = (c.data or {}).get("control_max_backup")
@@ -98,6 +105,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     async def cancel_max_backup(call: ServiceCall) -> None:
         c = _coordinator(hass, call)
+        _require_max_backup(c)  # 2026-09-29: pypowerwall-server support
         await _send(c, "/control/max_backup", "cancel", "max backup cancel")
 
     hass.services.async_register(DOMAIN, SERVICE_SET_RESERVE, set_reserve, schema=SCHEMA_SET_RESERVE)

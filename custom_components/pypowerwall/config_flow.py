@@ -27,6 +27,8 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+from .const import BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
+from .coordinator import detect_backend  # 2026-09-29: pypowerwall-server support
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +72,9 @@ async def validate_connection(
         return "cannot_connect"
 
     if control_secret:
+        # 2026-09-29: pypowerwall-server checks a Bearer token on a JSON POST instead
+        if await _probe_backend(session, base, timeout) == BACKEND_SERVER:
+            return await _validate_server_secret(session, base, control_secret, timeout)
         # /control/mode with a bogus value validates the token without changing
         # anything: the proxy checks the token before the value.
         try:
@@ -84,6 +89,44 @@ async def validate_connection(
                     return "control_unsupported"
         except (aiohttp.ClientError, TimeoutError):
             return "cannot_connect"
+    return None
+
+
+async def _probe_backend(
+    session: aiohttp.ClientSession, base: str, timeout: aiohttp.ClientTimeout
+) -> str | None:
+    """2026-09-29: BACKEND_PROXY / BACKEND_SERVER from /health, None if unknown."""
+    try:
+        async with session.get(f"{base}/health", timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            return detect_backend(await resp.json(content_type=None))
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        return None
+
+
+async def _validate_server_secret(
+    session: aiohttp.ClientSession, base: str, control_secret: str, timeout: aiohttp.ClientTimeout
+) -> str | None:
+    """2026-09-29: validate the control secret against pypowerwall-server.
+
+    The server checks the token before the body, so an empty mode is safe:
+    good token -> 400 (invalid mode, nothing written), bad token -> 401,
+    PW_CONTROL_SECRET not set on the server -> 403.
+    """
+    try:
+        async with session.post(
+            f"{base}/control/mode",
+            json={"value": ""},
+            headers={"Authorization": f"Bearer {control_secret}"},
+            timeout=timeout,
+        ) as resp:
+            if resp.status == 401:
+                return "invalid_auth"
+            if resp.status in (403, 404):
+                return "control_unsupported"
+    except (aiohttp.ClientError, TimeoutError):
+        return "cannot_connect"
     return None
 
 
