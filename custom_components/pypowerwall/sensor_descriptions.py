@@ -15,15 +15,20 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     PERCENTAGE,
+    REVOLUTIONS_PER_MINUTE,  # 2026-10-10: fan sensors
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfFrequency,
     UnitOfPower,
+    UnitOfReactivePower,  # 2026-10-10: L3 / remote meter reactive power
+    UnitOfTemperature,  # 2026-10-10: Powerwall temperature sensors
     UnitOfTime,
 )
 from homeassistant.util import dt as dt_util
+
+from .payload import health_version, soe_app, soe_raw, ws_to_wh  # 2026-10-10
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +112,28 @@ def _energy(section: str, field: str):
                 return v
         v = (d.get("aggregates") or {}).get(section, {}).get(field)
         return v if v else None
+
+    return _fn
+
+
+def _grid_export_policy(d: dict) -> str | None:
+    """Export policy: proxy GET /control/grid_export, else /api/operation (server). 2026-10-10."""
+    ctl = d.get("control_grid_export")
+    if isinstance(ctl, dict) and ctl.get("grid_export") in ("battery_ok", "pv_only", "never"):
+        return ctl["grid_export"]
+    op = d.get("operation")
+    if isinstance(op, dict) and op.get("grid_export") in ("battery_ok", "pv_only", "never"):
+        return op["grid_export"]
+    return None
+
+
+def _sum_phases(meter: str, field: str):
+    """Sum of a per-CT value over phases A-C of a TESYNC meter (None when no phase reports). 2026-10-10."""
+
+    def _fn(v: dict) -> float | None:
+        vals = [v.get(f"METER_{meter}_CT{ph}_{field}") for ph in "ABC"]
+        vals = [x for x in vals if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        return round(sum(vals), 3) if vals else None
 
     return _fn
 
@@ -224,9 +251,24 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
-        value_fn=lambda d: round(d["json"]["soe"], 1)
-        if d["json"].get("soe") is not None
-        else None,
+        # [OLD 2026-10-10] replaced: /json.soe is the raw level on the proxy but the
+        # app-scaled level on pypowerwall-server (raw is soe_raw there), so the same
+        # sensor meant two different things. Now always raw. Delete when happy.
+        # value_fn=lambda d: round(d["json"]["soe"], 1)
+        # if d["json"].get("soe") is not None
+        # else None,
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: round(soe_raw(d["json"]), 1) if soe_raw(d["json"]) is not None else None,
+    ),
+    # 2026-10-10: the level as the Tesla app shows it (pypowerwall-server "battery")
+    PyPowerwallSensorDescription(
+        key="battery_level_app",
+        translation_key="battery_level_app",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda d: round(soe_app(d["json"]), 1) if soe_app(d["json"]) is not None else None,
     ),
     PyPowerwallSensorDescription(
         key="battery_reserve",
@@ -321,12 +363,25 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: (d.get("operation") or {}).get("real_mode"),
     ),
+    # 2026-10-10: read-only export policy (pypowerwall-server "grid_export" sensor);
+    # works without a control secret when /api/operation carries it (server).
+    PyPowerwallSensorDescription(
+        key="grid_export_policy",
+        translation_key="grid_export_policy",
+        icon="mdi:transmission-tower-export",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: _grid_export_policy(d),
+    ),
     PyPowerwallSensorDescription(
         key="pypowerwall_version",
         translation_key="pypowerwall_version",
         icon="mdi:information-outline",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: (d.get("health") or {}).get("pypowerwall"),
+        # [OLD 2026-10-10] replaced: pypowerwall-server reports "version", not
+        # "pypowerwall", in /health -> the sensor was always unknown there. Delete when happy.
+        # value_fn=lambda d: (d.get("health") or {}).get("pypowerwall"),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: health_version(d.get("health")),
     ),
     PyPowerwallSensorDescription(
         key="firmware_version",
@@ -581,12 +636,18 @@ POD_SENSORS: tuple[VitalsSensorDescription, ...] = (
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
-        value_fn=lambda d: round(
-            d.get("POD_nom_energy_remaining", 0)
-            / max(d.get("POD_nom_full_pack_energy", 1), 1)
-            * 100,
-            1,
-        ),
+        # [OLD 2026-10-10] replaced: a missing/None energy value reported 0 % (or raised
+        # TypeError on None) instead of unknown during degraded polls. Delete when happy.
+        # value_fn=lambda d: round(
+        #     d.get("POD_nom_energy_remaining", 0)
+        #     / max(d.get("POD_nom_full_pack_energy", 1), 1)
+        #     * 100,
+        #     1,
+        # ),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: round(d["POD_nom_energy_remaining"] / d["POD_nom_full_pack_energy"] * 100, 1)
+        if d.get("POD_nom_energy_remaining") is not None and d.get("POD_nom_full_pack_energy")
+        else None,
     ),
     VitalsSensorDescription(
         key="pod_energy_remaining",
@@ -627,7 +688,13 @@ INVERTER_SENSORS: tuple[VitalsSensorDescription, ...] = (
     VitalsSensorDescription(
         key="inverter_power",
         translation_key="inverter_power",
-        native_unit_of_measurement=UnitOfPower.WATT,
+        # [OLD 2026-10-10] replaced: PINV_Pout is reported in kW (pypowerwall divides
+        # by 1000), so -0.97 kW showed as "-0.97 W". Delete when happy.
+        # native_unit_of_measurement=UnitOfPower.WATT,
+        # suggested_display_precision=0,
+        # [/OLD 2026-10-10]
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        suggested_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
@@ -813,6 +880,47 @@ GRID_METER_SENSORS: tuple[VitalsSensorDescription, ...] = (
         entity_registry_enabled_default=False,
         value_fn=lambda d: d.get("METER_Z_CTB_InstReactivePower"),
     ),
+    # 2026-10-10: third phase (three-phase sites); disabled by default
+    VitalsSensorDescription(
+        key="grid_l3_power",
+        translation_key="grid_l3_power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("METER_Z_CTC_InstRealPower"),
+    ),
+    VitalsSensorDescription(
+        key="grid_l3_voltage",
+        translation_key="grid_l3_voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("METER_Z_VL3N"),
+    ),
+    VitalsSensorDescription(
+        key="grid_l3_current",
+        translation_key="grid_l3_current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("METER_Z_CTC_I"),
+    ),
+    VitalsSensorDescription(
+        key="grid_l3_reactive_power",
+        translation_key="grid_l3_reactive_power",
+        native_unit_of_measurement=UnitOfReactivePower.VOLT_AMPERE_REACTIVE,
+        device_class=SensorDeviceClass.REACTIVE_POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("METER_Z_CTC_InstReactivePower"),
+    ),
     VitalsSensorDescription(
         key="grid_lifetime_energy_export",
         translation_key="grid_lifetime_energy_export",
@@ -920,6 +1028,83 @@ ISLAND_SENSORS: tuple[VitalsSensorDescription, ...] = (
         entity_registry_enabled_default=False,
         value_fn=lambda d: d.get("ISLAND_VL2N_Load"),
     ),
+    # 2026-10-10: third phase + the gateway's internal meters X / Y; disabled by default
+    VitalsSensorDescription(
+        key="island_freq_l3_main",
+        translation_key="island_freq_l3_main",
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("ISLAND_FreqL3_Main"),
+    ),
+    VitalsSensorDescription(
+        key="island_freq_l3_load",
+        translation_key="island_freq_l3_load",
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("ISLAND_FreqL3_Load"),
+    ),
+    VitalsSensorDescription(
+        key="island_voltage_l3_main",
+        translation_key="island_voltage_l3_main",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("ISLAND_VL3N_Main"),
+    ),
+    VitalsSensorDescription(
+        key="island_voltage_l3_load",
+        translation_key="island_voltage_l3_load",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.get("ISLAND_VL3N_Load"),
+    ),
+    *(
+        desc
+        for meter in ("X", "Y")
+        for desc in (
+            VitalsSensorDescription(
+                key=f"meter_{meter.lower()}_power",
+                translation_key=f"meter_{meter.lower()}_power",
+                native_unit_of_measurement=UnitOfPower.WATT,
+                device_class=SensorDeviceClass.POWER,
+                state_class=SensorStateClass.MEASUREMENT,
+                suggested_display_precision=0,
+                entity_registry_enabled_default=False,
+                value_fn=_sum_phases(meter, "InstRealPower"),
+            ),
+            VitalsSensorDescription(
+                key=f"meter_{meter.lower()}_energy_import",
+                translation_key=f"meter_{meter.lower()}_energy_import",
+                native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+                device_class=SensorDeviceClass.ENERGY,
+                state_class=SensorStateClass.TOTAL_INCREASING,
+                suggested_display_precision=0,
+                entity_registry_enabled_default=False,
+                value_fn=lambda d, m=meter: d.get(f"METER_{m}_LifetimeEnergyImport") or None,
+            ),
+            VitalsSensorDescription(
+                key=f"meter_{meter.lower()}_energy_export",
+                translation_key=f"meter_{meter.lower()}_energy_export",
+                native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+                device_class=SensorDeviceClass.ENERGY,
+                state_class=SensorStateClass.TOTAL_INCREASING,
+                suggested_display_precision=0,
+                entity_registry_enabled_default=False,
+                value_fn=lambda d, m=meter: d.get(f"METER_{m}_LifetimeEnergyExport") or None,
+            ),
+        )
+    ),
     VitalsSensorDescription(
         key="island_grid_state",
         translation_key="island_grid_state",
@@ -961,3 +1146,175 @@ STRING_FIELDS = (
 )
 
 
+
+
+# ---------------------------------------------------------------------------
+#  Per-pack sensors (2026-10-10) — value_fn receives data["packs"][serial],
+#  i.e. system_status.battery_blocks merged with /pod (see payload.build_packs).
+#  Created enabled only when the pack reports the value at setup (most are
+#  null on TEDAPI / v1r transports).
+# ---------------------------------------------------------------------------
+PACK_SENSORS: tuple[VitalsSensorDescription, ...] = (
+    VitalsSensorDescription(
+        key="pack_available_charge_power",
+        translation_key="pack_available_charge_power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:battery-arrow-up-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("POD_available_charge_power"),
+    ),
+    VitalsSensorDescription(
+        key="pack_available_discharge_power",
+        translation_key="pack_available_discharge_power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:battery-arrow-down-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("POD_available_dischg_power"),
+    ),
+    VitalsSensorDescription(
+        key="pack_energy_charged",
+        translation_key="pack_energy_charged",
+        native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+        suggested_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=2,
+        icon="mdi:battery-arrow-up",
+        # 0 means "not reported" (TEDAPI); never reset a total_increasing sensor with it
+        value_fn=lambda p: p.get("energy_charged") or None,
+    ),
+    VitalsSensorDescription(
+        key="pack_energy_discharged",
+        translation_key="pack_energy_discharged",
+        native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
+        suggested_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=2,
+        icon="mdi:battery-arrow-down",
+        value_fn=lambda p: p.get("energy_discharged") or None,
+    ),
+    VitalsSensorDescription(
+        key="pack_output_voltage",
+        translation_key="pack_output_voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,  # duplicates the inverter sensors on most systems
+        value_fn=lambda p: p.get("v_out"),
+    ),
+    VitalsSensorDescription(
+        key="pack_output_current",
+        translation_key="pack_output_current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("i_out"),
+    ),
+    VitalsSensorDescription(
+        key="pack_output_frequency",
+        translation_key="pack_output_frequency",
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,  # duplicates the inverter sensors on most systems
+        value_fn=lambda p: p.get("f_out"),
+    ),
+    VitalsSensorDescription(
+        key="pack_grid_state",
+        translation_key="pack_grid_state",
+        icon="mdi:transmission-tower",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("pinv_grid_state"),
+    ),
+    VitalsSensorDescription(
+        key="pack_op_seq_state",
+        translation_key="pack_op_seq_state",
+        icon="mdi:state-machine",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("OpSeqState"),
+    ),
+    VitalsSensorDescription(
+        key="pack_firmware_version",
+        translation_key="pack_firmware_version",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda p: p.get("version"),
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+#  Per-unit temperature / fan sensors (2026-10-10) — same metric ids as
+#  pypowerwall-server's MQTT discovery; value from data["unit_signals"][serial].
+# ---------------------------------------------------------------------------
+def _temp(key: str, icon: str) -> SensorEntityDescription:
+    return SensorEntityDescription(
+        key=key,
+        translation_key=key,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon=icon,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    )
+
+
+def _fan(key: str, unit: str, icon: str, precision: int) -> SensorEntityDescription:
+    return SensorEntityDescription(
+        key=key,
+        translation_key=key,
+        native_unit_of_measurement=unit,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=precision,
+        icon=icon,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    )
+
+
+UNIT_SIGNAL_SENSORS: dict[str, SensorEntityDescription] = {
+    "pack_temp_max": _temp("pack_temp_max", "mdi:thermometer-high"),
+    "pack_temp_min": _temp("pack_temp_min", "mdi:thermometer-low"),
+    "shunt_temp": _temp("shunt_temp", "mdi:thermometer"),
+    "inverter_ambient": _temp("inverter_ambient", "mdi:thermometer"),
+    "controller_ambient": _temp("controller_ambient", "mdi:thermometer"),
+    "fan_a_rpm": _fan("fan_a_rpm", REVOLUTIONS_PER_MINUTE, "mdi:fan", 0),
+    "fan_b_rpm": _fan("fan_b_rpm", REVOLUTIONS_PER_MINUTE, "mdi:fan", 0),
+    "fan_rpm": _fan("fan_rpm", REVOLUTIONS_PER_MINUTE, "mdi:fan", 0),
+    "fan_target_rpm": _fan("fan_target_rpm", REVOLUTIONS_PER_MINUTE, "mdi:speedometer", 0),
+    "fan_a_duty": _fan("fan_a_duty", PERCENTAGE, "mdi:percent", 1),
+    "fan_b_duty": _fan("fan_b_duty", PERCENTAGE, "mdi:percent", 1),
+}
+
+
+# ---------------------------------------------------------------------------
+#  Remote / Neurio meter CT fields (2026-10-10):
+#  (key, label, CT metric, unit, device class, state class, converter, enabled, kinds)
+# ---------------------------------------------------------------------------
+REMOTE_METER_FIELDS = (
+    ("power", "Power", "InstRealPower", UnitOfPower.WATT, SensorDeviceClass.POWER,
+     SensorStateClass.MEASUREMENT, None, True, ("trm", "neurio")),
+    ("voltage", "Voltage", "InstVoltage", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE,
+     SensorStateClass.MEASUREMENT, None, True, ("trm", "neurio")),
+    ("current", "Current", "InstCurrent", UnitOfElectricCurrent.AMPERE, SensorDeviceClass.CURRENT,
+     SensorStateClass.MEASUREMENT, None, True, ("trm", "neurio")),
+    ("reactive_power", "Reactive Power", "InstReactivePower", UnitOfReactivePower.VOLT_AMPERE_REACTIVE,
+     SensorDeviceClass.REACTIVE_POWER, SensorStateClass.MEASUREMENT, None, False, ("trm", "neurio")),
+    ("energy_imported", "Energy Imported", "EnergyImportedWs", UnitOfEnergy.WATT_HOUR, SensorDeviceClass.ENERGY,
+     SensorStateClass.TOTAL_INCREASING, ws_to_wh, True, ("trm",)),
+    ("energy_exported", "Energy Exported", "EnergyExportedWs", UnitOfEnergy.WATT_HOUR, SensorDeviceClass.ENERGY,
+     SensorStateClass.TOTAL_INCREASING, ws_to_wh, True, ("trm",)),
+)

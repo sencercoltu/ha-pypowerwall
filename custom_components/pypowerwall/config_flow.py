@@ -20,14 +20,25 @@ from homeassistant.helpers.selector import (
 )
 import voluptuous as vol
 
+# [OLD 2026-10-10] replaced: two separate `from .const import` blocks fail ruff's
+# isort check (I001) in CI; merged into one below. Delete this block when happy.
+# from .const import (
+#     CONF_CONTROL_SECRET,
+#     CONF_SCAN_INTERVAL,
+#     DEFAULT_PORT,
+#     DEFAULT_SCAN_INTERVAL,
+#     DOMAIN,
+# )
+# from .const import BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
+# [/OLD 2026-10-10]
 from .const import (
+    BACKEND_SERVER,  # 2026-09-29: pypowerwall-server support
     CONF_CONTROL_SECRET,
     CONF_SCAN_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
-from .const import BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
 from .coordinator import detect_backend  # 2026-09-29: pypowerwall-server support
 
 _LOGGER = logging.getLogger(__name__)

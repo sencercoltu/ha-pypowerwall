@@ -3,6 +3,49 @@
 All notable changes to this integration are documented here.
 Versions follow the `version` field in `custom_components/pypowerwall/manifest.json`.
 
+## 0.5.0 — unreleased
+
+### Added
+- **pypowerwall-server backend** — the integration detects from `/health` whether it talks to the
+  pypowerwall proxy or [pypowerwall-server](https://github.com/jasonacox/pypowerwall-server) and
+  uses the server's JSON + Bearer-token control API. Max backup is proxy-only and is not created
+  on the server.
+- Entities matching pypowerwall-server's MQTT discovery catalogue:
+  - **Battery Level (App)** — the Tesla-app scaled level (raw 5–100 % → 0–100 %), next to the raw
+    Battery Level.
+  - **Powerwall temperatures and fans** per unit: pack temp max/min and shunt temp (PW3), inverter
+    ambient (PW3), thermal controller ambient (PW2/+), fan A/B speed and duty (PW3), fan speed and
+    target speed (PW2/+, from the newly polled `/fans`). Created only for signals the unit reports.
+  - **Tesla Remote Meter (TRM) and Neurio meter CTs** — power, voltage, current, reactive power and,
+    for remote meters, lifetime energy imported/exported (Energy-Dashboard ready). One device per meter.
+  - **Grid Export Policy** sensor and **Grid Charging Allowed** binary sensor — read-only, so they
+    also work without a control secret where the backend reports them.
+  - **Go Off Grid / Reconnect Grid** buttons and `pypowerwall.go_off_grid` (needs `confirm: true`) /
+    `pypowerwall.reconnect_grid` services — pypowerwall-server with a v1r gateway only; buttons are
+    disabled by default.
+  - **Gateways Online** binary sensor (pypowerwall-server).
+- Per-Powerwall sensors from `battery_blocks` / `/pod`: available charge/discharge power, lifetime
+  energy charged/discharged, output voltage/current/frequency, inverter grid state, operation
+  sequence state, firmware version; Off Grid and VF Mode flags. Enabled only when the pack reports
+  the value at setup (most are null on TEDAPI / v1r).
+- Three-phase support: Grid L3 power/voltage/current/reactive power, Island L3 frequency/voltage
+  (disabled by default). Gateway meters X / Y power and lifetime energy on the Sync Controller
+  (disabled by default).
+
+### Fixed
+- Pod health flags (Active Heating, Charge Complete, Permanently Faulted, …) were attached to the
+  wrong Powerwall: the proxy's `/pod` numbers `POD_*` fields by vitals order but block fields by
+  `battery_blocks` order. Flags are now matched by serial.
+- Inverter Power was a kW value labelled W (`-0.97 W` instead of `-970 W`).
+- Battery Level meant the raw level on the proxy but the app-scaled level on pypowerwall-server; it
+  is now always raw (see Battery Level (App)).
+- Proxy Degraded / Proxy Fallback Mode binary sensors, their repair issues and the PyPowerwall
+  Version sensor did not understand pypowerwall-server's `/health` and were always off/unknown.
+- Grid Connected reported "disconnected" instead of unknown when `/json` was unavailable.
+- Pod SOC reported 0 % instead of unknown when the pack energy was missing.
+- Services could target an unloaded/disabled config entry (or call it "ambiguous").
+- `ruff` (CI) failed on duplicated `from .const import` blocks.
+
 ## 0.4.2 — 2026-08-16
 
 ### Fixed

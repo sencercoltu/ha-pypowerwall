@@ -31,16 +31,18 @@ No Python pypowerwall library required in HA — pure `aiohttp`.
 
 | Platform        | Description                                                                              |
 | --------------- | ---------------------------------------------------------------------------------------- |
-| `sensor`        | Power, energy (Energy Dashboard), battery, grid, inverter, PVAC, PV string, island controller, grid meter, gateway & proxy diagnostics |
-| `binary_sensor` | Grid status, alerts, pod health flags, PV string connected, proxy degraded / fallback, per-transport connectivity |
+| `sensor`        | Power, energy (Energy Dashboard), battery (raw + app-scaled), grid, inverter, PVAC, PV string, island controller, grid meter (1–3 phase), Powerwall temperatures & fans, per-pack data, remote / Neurio meter CTs, gateway & proxy diagnostics |
+| `binary_sensor` | Grid status, grid charging allowed, alerts, pod health flags, PV string connected, proxy degraded / fallback, per-transport connectivity, gateways online (server) |
 | `event`         | `alert_fired` / `alert_cleared` for automations                                          |
-| `number`        | Backup reserve %, max backup duration (requires `control_secret`)                        |
+| `number`        | Backup reserve %, max backup duration (requires `control_secret`; max backup: proxy only) |
 | `select`        | Operation mode and grid export policy (requires `control_secret`)                        |
-| `switch`        | Grid charging, max backup (requires `control_secret`)                                    |
-| services        | `pypowerwall.set_reserve` / `set_mode` / `set_grid_export` / `set_grid_charging` / `start_max_backup` / `cancel_max_backup` |
+| `switch`        | Grid charging, max backup (requires `control_secret`; max backup: proxy only)            |
+| `button`        | Go off grid / reconnect grid (pypowerwall-server + v1r, requires `control_secret`, disabled by default) |
+| services        | `pypowerwall.set_reserve` / `set_mode` / `set_grid_export` / `set_grid_charging` / `start_max_backup` / `cancel_max_backup` / `go_off_grid` / `reconnect_grid` |
 
 ## Features
 
+- **Works with the pypowerwall proxy and pypowerwall-server** — the backend is detected automatically
 - **Multi-Powerwall support** — Primary, Follower, and Expansion pod detection
 - **Per-device sensors** — TEPOD (battery), TEPINV (inverter), PVAC (solar combiner), PVS strings A–F, TEMSA (grid meter), TESYNC (island controller)
 - **Grid meter per-leg data** — L1/L2 power, voltage, current, reactive power, and lifetime energy counters
@@ -56,6 +58,9 @@ No Python pypowerwall library required in HA — pure `aiohttp`.
 - **Services** — `pypowerwall.set_reserve`, `set_mode`, `set_grid_export`, `set_grid_charging`, `start_max_backup`, `cancel_max_backup` for automations (require the control secret)
 - **Brand icon** — shipped in `custom_components/pypowerwall/brand/` (shown by HA 2026.3+ without a brands-repo submission)
 - **Repairs** — a repair issue is raised while the proxy reports a degraded connection or fallback mode, and cleared when it recovers
+- **Temperatures & fans** — per Powerwall: pack/shunt/inverter temperatures and fan speed/duty (PW3), thermal controller temperature and fan speed (PW2/+)
+- **Remote meters** — Tesla Remote Meter and Neurio CT power, voltage, current and (remote meter) lifetime energy
+- **Islanding** — go off grid / reconnect buttons and services (pypowerwall-server on a v1r gateway)
 - **Transport visibility** — one connectivity sensor per proxy→gateway transport (`v1r_lan`, `wifi_tedapi`, `lan_control`, …) so you can see *why* data is degraded
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for endpoints, design decisions and testing notes, and [CHANGELOG.md](CHANGELOG.md) for release notes.

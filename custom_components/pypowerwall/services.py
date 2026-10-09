@@ -1,6 +1,7 @@
 """Services: direct control commands with parameters (for automations)."""
 from __future__ import annotations
 
+from homeassistant.config_entries import ConfigEntryState  # 2026-10-10
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
@@ -14,6 +15,8 @@ from .const import (
     ATTR_RESERVE,
     DOMAIN,
     SERVICE_CANCEL_MAX_BACKUP,
+    SERVICE_GO_OFF_GRID,  # 2026-10-10
+    SERVICE_RECONNECT_GRID,  # 2026-10-10
     SERVICE_SET_GRID_CHARGING,
     SERVICE_SET_GRID_EXPORT,
     SERVICE_SET_MODE,
@@ -37,11 +40,22 @@ SCHEMA_START_MAX_BACKUP = vol.Schema(
     {**_ENTRY, vol.Optional(ATTR_MINUTES): vol.All(vol.Coerce(int), vol.Range(1, 480))}
 )
 SCHEMA_CANCEL_MAX_BACKUP = vol.Schema(_ENTRY)
+# 2026-10-10: islanding (pypowerwall-server, v1r). Going off grid needs an explicit confirm.
+SCHEMA_GO_OFF_GRID = vol.Schema({**_ENTRY, vol.Required("confirm"): cv.boolean})
+SCHEMA_RECONNECT_GRID = vol.Schema(_ENTRY)
 
 
 def _coordinator(hass: HomeAssistant, call: ServiceCall) -> PyPowerwallCoordinator:
     """Resolve the target coordinator: explicit config_entry_id, or the only loaded entry."""
-    entries = [e for e in hass.config_entries.async_entries(DOMAIN) if hasattr(e, "runtime_data")]
+    # [OLD 2026-10-10] replaced: runtime_data survives an unload, so a disabled /
+    # unloaded entry still counted (wrong target, or "ambiguous"). Delete when happy.
+    # entries = [e for e in hass.config_entries.async_entries(DOMAIN) if hasattr(e, "runtime_data")]
+    # [/OLD 2026-10-10]
+    entries = [
+        e
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.state is ConfigEntryState.LOADED and hasattr(e, "runtime_data")
+    ]
     entry_id = call.data.get(ATTR_CONFIG_ENTRY)
     if entry_id:
         entries = [e for e in entries if e.entry_id == entry_id]
@@ -62,6 +76,24 @@ def _require_max_backup(coordinator: PyPowerwallCoordinator) -> None:
     """2026-09-29: pypowerwall-server has no /control/max_backup."""
     if not coordinator.supports_max_backup:
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="max_backup_unsupported")
+
+
+def _require_islanding(coordinator: PyPowerwallCoordinator) -> None:
+    """2026-10-10: only pypowerwall-server has POST /control/islanding."""
+    if not coordinator.supports_islanding:
+        raise ServiceValidationError(translation_domain=DOMAIN, translation_key="islanding_unsupported")
+
+
+async def send_islanding(coordinator: PyPowerwallCoordinator, action: str) -> None:
+    """2026-10-10: shared by the services and the buttons."""
+    error = await coordinator.send_islanding(action)
+    if error is not None:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="islanding_failed",
+            translation_placeholders={"error": error},
+        )
+    await coordinator.async_request_refresh()
 
 
 async def _send(coordinator: PyPowerwallCoordinator, path: str, value, what: str) -> None:
@@ -108,6 +140,20 @@ def async_setup_services(hass: HomeAssistant) -> None:
         _require_max_backup(c)  # 2026-09-29: pypowerwall-server support
         await _send(c, "/control/max_backup", "cancel", "max backup cancel")
 
+    async def go_off_grid(call: ServiceCall) -> None:  # 2026-10-10
+        c = _coordinator(hass, call)
+        _require_islanding(c)
+        if not call.data["confirm"]:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="islanding_confirm")
+        await send_islanding(c, "off_grid")
+
+    async def reconnect_grid(call: ServiceCall) -> None:  # 2026-10-10
+        c = _coordinator(hass, call)
+        _require_islanding(c)
+        await send_islanding(c, "on_grid")
+
+    hass.services.async_register(DOMAIN, SERVICE_GO_OFF_GRID, go_off_grid, schema=SCHEMA_GO_OFF_GRID)
+    hass.services.async_register(DOMAIN, SERVICE_RECONNECT_GRID, reconnect_grid, schema=SCHEMA_RECONNECT_GRID)
     hass.services.async_register(DOMAIN, SERVICE_SET_RESERVE, set_reserve, schema=SCHEMA_SET_RESERVE)
     hass.services.async_register(DOMAIN, SERVICE_SET_MODE, set_mode, schema=SCHEMA_SET_MODE)
     hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, set_grid_export, schema=SCHEMA_SET_GRID_EXPORT)

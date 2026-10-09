@@ -262,6 +262,117 @@
       },
       "proxy_data_age": {
         "name": "Proxy Data Age"
+      },
+      "battery_level_app": {
+        "name": "Battery Level (App)"
+      },
+      "grid_export_policy": {
+        "name": "Grid Export Policy"
+      },
+      "grid_l3_power": {
+        "name": "Grid L3 Power"
+      },
+      "grid_l3_voltage": {
+        "name": "Grid L3 Voltage"
+      },
+      "grid_l3_current": {
+        "name": "Grid L3 Current"
+      },
+      "grid_l3_reactive_power": {
+        "name": "Grid L3 Reactive Power"
+      },
+      "island_freq_l3_main": {
+        "name": "Island Freq L3 Main"
+      },
+      "island_freq_l3_load": {
+        "name": "Island Freq L3 Load"
+      },
+      "island_voltage_l3_main": {
+        "name": "Island Voltage L3 Main"
+      },
+      "island_voltage_l3_load": {
+        "name": "Island Voltage L3 Load"
+      },
+      "meter_x_power": {
+        "name": "Meter X Power"
+      },
+      "meter_x_energy_import": {
+        "name": "Meter X Energy Imported"
+      },
+      "meter_x_energy_export": {
+        "name": "Meter X Energy Exported"
+      },
+      "meter_y_power": {
+        "name": "Meter Y Power"
+      },
+      "meter_y_energy_import": {
+        "name": "Meter Y Energy Imported"
+      },
+      "meter_y_energy_export": {
+        "name": "Meter Y Energy Exported"
+      },
+      "pack_available_charge_power": {
+        "name": "Available Charge Power"
+      },
+      "pack_available_discharge_power": {
+        "name": "Available Discharge Power"
+      },
+      "pack_energy_charged": {
+        "name": "Energy Charged"
+      },
+      "pack_energy_discharged": {
+        "name": "Energy Discharged"
+      },
+      "pack_output_voltage": {
+        "name": "Output Voltage"
+      },
+      "pack_output_current": {
+        "name": "Output Current"
+      },
+      "pack_output_frequency": {
+        "name": "Output Frequency"
+      },
+      "pack_grid_state": {
+        "name": "Inverter Grid State"
+      },
+      "pack_op_seq_state": {
+        "name": "Operation Sequence State"
+      },
+      "pack_firmware_version": {
+        "name": "Firmware Version"
+      },
+      "pack_temp_max": {
+        "name": "Pack Temperature Max"
+      },
+      "pack_temp_min": {
+        "name": "Pack Temperature Min"
+      },
+      "shunt_temp": {
+        "name": "Shunt Temperature"
+      },
+      "inverter_ambient": {
+        "name": "Inverter Ambient Temperature"
+      },
+      "controller_ambient": {
+        "name": "Thermal Controller Temperature"
+      },
+      "fan_a_rpm": {
+        "name": "Fan A Speed"
+      },
+      "fan_b_rpm": {
+        "name": "Fan B Speed"
+      },
+      "fan_rpm": {
+        "name": "Fan Speed"
+      },
+      "fan_target_rpm": {
+        "name": "Fan Target Speed"
+      },
+      "fan_a_duty": {
+        "name": "Fan A Duty"
+      },
+      "fan_b_duty": {
+        "name": "Fan B Duty"
       }
     },
     "binary_sensor": {
@@ -318,6 +429,18 @@
       },
       "transport": {
         "name": "Transport {transport}"
+      },
+      "pod_off_grid": {
+        "name": "Off Grid"
+      },
+      "pod_vf_mode": {
+        "name": "VF Mode"
+      },
+      "grid_charging_allowed": {
+        "name": "Grid Charging Allowed"
+      },
+      "gateways_online": {
+        "name": "Gateways Online"
       }
     },
     "number": {
@@ -365,6 +488,14 @@
             }
           }
         }
+      }
+    },
+    "button": {
+      "go_off_grid": {
+        "name": "Go Off Grid"
+      },
+      "reconnect_grid": {
+        "name": "Reconnect Grid"
       }
     }
   },
@@ -448,6 +579,30 @@
           "description": "Which pypowerwall proxy to target (only needed with more than one)."
         }
       }
+    },
+    "go_off_grid": {
+      "name": "Go off grid",
+      "description": "Disconnect the site from the grid (islanding). pypowerwall-server with a v1r gateway only.",
+      "fields": {
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true: the site really switches to battery power."
+        },
+        "config_entry_id": {
+          "name": "PyPowerwall entry",
+          "description": "Which pypowerwall proxy to target (only needed with more than one)."
+        }
+      }
+    },
+    "reconnect_grid": {
+      "name": "Reconnect grid",
+      "description": "Reconnect the site to the grid after islanding. pypowerwall-server with a v1r gateway only.",
+      "fields": {
+        "config_entry_id": {
+          "name": "PyPowerwall entry",
+          "description": "Which pypowerwall proxy to target (only needed with more than one)."
+        }
+      }
     }
   },
   "selector": {
@@ -488,6 +643,15 @@
     },
     "max_backup_unsupported": {
       "message": "Max backup is not available on pypowerwall-server; it is only supported by the pypowerwall proxy (v1r LAN transport)."
+    },
+    "islanding_unsupported": {
+      "message": "Going off grid / reconnecting is only available on pypowerwall-server (v1r LAN transport)."
+    },
+    "islanding_confirm": {
+      "message": "Set confirm: true to take the site off grid."
+    },
+    "islanding_failed": {
+      "message": "Islanding command failed: {error}. Check the grid status before retrying."
     }
   }
 }

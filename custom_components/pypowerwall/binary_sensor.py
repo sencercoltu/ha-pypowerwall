@@ -19,8 +19,17 @@ from .entity import (
     build_block_by_serial,
     build_device_labels,
     device_identifier,
-    parse_pod_data,
+    # [OLD 2026-10-10] parse_pod_data no longer used here (see PyPowerwallPodHealthFlag)
+    # parse_pod_data,
+    # [/OLD 2026-10-10]
     parse_vitals_key,
+)
+from .payload import (  # 2026-10-10
+    health_degraded,
+    health_fallback,
+    health_fallback_details,
+    is_server_health,
+    server_gateways_online,
 )
 
 # ---------------------------------------------------------------------------
@@ -36,6 +45,9 @@ POD_HEALTH_FLAGS: tuple[tuple[str, str, BinarySensorDeviceClass | None, bool], .
     ("pod_backup_ready", "backup_ready", None, False),
     ("pod_wobble_detected", "wobble_detected", BinarySensorDeviceClass.PROBLEM, False),
     ("pod_charge_power_clamped", "charge_power_clamped", BinarySensorDeviceClass.PROBLEM, False),
+    # 2026-10-10: remaining battery_blocks flags reported by /pod
+    ("pod_off_grid", "off_grid", None, False),
+    ("pod_vf_mode", "vf_mode", None, False),
 )
 
 
@@ -55,6 +67,11 @@ async def async_setup_entry(
         PyPowerwallAlertsActive(coordinator, entry_id),
     ]
     entities.extend(PyPowerwallTransport(coordinator, entry_id, n) for n in transport_names(coordinator))
+    # 2026-10-10: read-only grid charging state (works without a control secret on
+    # pypowerwall-server) and the server's gateway-online status
+    entities.append(PyPowerwallGridChargingAllowed(coordinator, entry_id))
+    if is_server_health((coordinator.data or {}).get("health")):
+        entities.append(PyPowerwallGatewaysOnline(coordinator, entry_id))
 
     vitals = coordinator.data.get("vitals") or {}
     block_by_serial = build_block_by_serial(coordinator.data)
@@ -144,8 +161,13 @@ class PyPowerwallGridConnected(PyPowerwallEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         try:
-            return self.coordinator.data["json"].get("grid_status") == 1
-        except (KeyError, TypeError):
+            # [OLD 2026-10-10] replaced: a missing /json reported the grid as
+            # disconnected (None == 1 -> False) instead of unknown. Delete when happy.
+            # return self.coordinator.data["json"].get("grid_status") == 1
+            # [/OLD 2026-10-10]
+            status = self.coordinator.data["json"].get("grid_status")
+            return None if status is None else status == 1
+        except (KeyError, TypeError, AttributeError):
             return None
 
 
@@ -188,14 +210,30 @@ class PyPowerwallProxyDegraded(PyPowerwallEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        try:
-            conn = self.coordinator.data["health"].get("connection_health", {})
-            return bool(conn.get("is_degraded", False))
-        except (KeyError, TypeError):
-            return None
+        # [OLD 2026-10-10] replaced: proxy-only shape; with pypowerwall-server this was
+        # always off. Delete when happy.
+        # try:
+        #     conn = self.coordinator.data["health"].get("connection_health", {})
+        #     return bool(conn.get("is_degraded", False))
+        # except (KeyError, TypeError):
+        #     return None
+        # [/OLD 2026-10-10]
+        return health_degraded((self.coordinator.data or {}).get("health"))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        health = (self.coordinator.data or {}).get("health")
+        if is_server_health(health):  # 2026-10-10: pypowerwall-server
+            return {
+                "status": health.get("status"),
+                "gateways": health.get("gateways"),
+                "gateways_online": health.get("gateways_online"),
+                "gateway_errors": {
+                    d.get("id"): d.get("error")
+                    for d in health.get("gateway_details") or []
+                    if isinstance(d, dict) and d.get("error")
+                },
+            }
         try:
             conn = self.coordinator.data["health"].get("connection_health", {})
             stats = self.coordinator.data["health"].get("proxy_stats", {})
@@ -361,15 +399,24 @@ class PyPowerwallPodHealthFlag(PyPowerwallEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
+        # [OLD 2026-10-10] replaced: /pod numbers PWn by battery_blocks order for block
+        # fields but by vitals TEPOD order for POD_* fields; keying the whole group by
+        # PackageSerialNumber attached POD_* flags to the wrong Powerwall. Delete when happy.
+        # try:
+        #     pod_by_serial = parse_pod_data(self.coordinator.data.get("pod"))
+        #     pw_data = pod_by_serial.get(self._serial, {})
+        #     val = pw_data.get(self._flag_key)
+        #     if val is None:
+        #         return None
+        #     return bool(val)
+        # except (KeyError, TypeError):
+        #     return None
+        # [/OLD 2026-10-10]
         try:
-            pod_by_serial = parse_pod_data(self.coordinator.data.get("pod"))
-            pw_data = pod_by_serial.get(self._serial, {})
-            val = pw_data.get(self._flag_key)
-            if val is None:
-                return None
-            return bool(val)
-        except (KeyError, TypeError):
+            val = self.coordinator.data["packs"][self._serial].get(self._flag_key)
+        except (KeyError, TypeError, AttributeError):
             return None
+        return None if val is None else bool(val)
 
 
 # ---------------------------------------------------------------------------
@@ -474,18 +521,25 @@ class PyPowerwallProxyFallback(PyPowerwallEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        fb = (self.coordinator.data.get("health") or {}).get("fallback_mode")
-        if not isinstance(fb, dict):
-            return None
-        return bool(fb.get("is_fallback_mode"))
+        # [OLD 2026-10-10] replaced: pypowerwall-server nests fallback_mode per gateway,
+        # so this read the wrong level and was always off there. Delete when happy.
+        # fb = (self.coordinator.data.get("health") or {}).get("fallback_mode")
+        # if not isinstance(fb, dict):
+        #     return None
+        # return bool(fb.get("is_fallback_mode"))
+        # [/OLD 2026-10-10]
+        return health_fallback(self.coordinator.data.get("health"))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        fb = (self.coordinator.data.get("health") or {}).get("fallback_mode") or {}
-        return {
-            k: fb.get(k)
-            for k in ("fallback_since", "fallback_duration_seconds", "recovery_attempts", "next_attempt_at")
-        }
+        # [OLD 2026-10-10] replaced: see is_on. Delete when happy.
+        # fb = (self.coordinator.data.get("health") or {}).get("fallback_mode") or {}
+        # return {
+        #     k: fb.get(k)
+        #     for k in ("fallback_since", "fallback_duration_seconds", "recovery_attempts", "next_attempt_at")
+        # }
+        # [/OLD 2026-10-10]
+        return health_fallback_details(self.coordinator.data.get("health"))
 
 
 class PyPowerwallTransport(PyPowerwallEntity, BinarySensorEntity):
@@ -528,3 +582,60 @@ def transport_names(coordinator: PyPowerwallCoordinator) -> list[str]:
     """Transport keys reported by the proxy at setup time."""
     t = (coordinator.data.get("health") or {}).get("transports")
     return sorted(t) if isinstance(t, dict) else []
+
+
+# ---------------------------------------------------------------------------
+#  2026-10-10: read-only grid charging + pypowerwall-server gateway status
+# ---------------------------------------------------------------------------
+def grid_charging_state(data: dict[str, Any] | None) -> bool | None:
+    """Grid charging allowed: proxy GET /control/grid_charging, else /api/operation (server)."""
+    data = data or {}
+    ctl = data.get("control_grid_charging")
+    if isinstance(ctl, dict) and isinstance(ctl.get("grid_charging"), bool):
+        return ctl["grid_charging"]
+    op = data.get("operation")
+    if isinstance(op, dict) and isinstance(op.get("grid_charging"), bool):
+        return op["grid_charging"]
+    return None
+
+
+class PyPowerwallGridChargingAllowed(PyPowerwallEntity, BinarySensorEntity):
+    """Whether the Powerwall may charge from the grid (read-only)."""
+
+    _attr_translation_key = "grid_charging_allowed"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: PyPowerwallCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_grid_charging_allowed"
+        # Only useful where the backend reports it (server, or proxy with control enabled)
+        self._attr_entity_registry_enabled_default = grid_charging_state(coordinator.data) is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return grid_charging_state(self.coordinator.data)
+
+
+class PyPowerwallGatewaysOnline(PyPowerwallEntity, BinarySensorEntity):
+    """pypowerwall-server: all configured gateways are online."""
+
+    _attr_translation_key = "gateways_online"
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: PyPowerwallCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_gateways_online"
+
+    @property
+    def is_on(self) -> bool | None:
+        return server_gateways_online(self.coordinator.data.get("health"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        health = self.coordinator.data.get("health") or {}
+        return {
+            "gateways": health.get("gateways"),
+            "gateways_online": health.get("gateways_online"),
+            "gateway_ids": health.get("gateway_ids"),
+        }

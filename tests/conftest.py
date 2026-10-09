@@ -66,6 +66,9 @@ class FakeProxy:
         self.get_log: list[str] = []
         self.last_query: dict[str, dict[str, str]] = {}  # path -> query params of last GET
         self.hang: set[str] = set()  # paths that never answer
+        # 2026-10-10: pypowerwall-server JSON posts (path, body, Authorization header)
+        self.json_posts: list[tuple[str, dict, str | None]] = []
+        self.post_status: dict[str, tuple[int, Any]] = {}  # path -> (status, json) for JSON posts
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -91,6 +94,16 @@ class FakeProxy:
 
     async def _post(self, request: web.Request) -> web.StreamResponse:
         path = "/" + request.match_info["tail"]
+        # 2026-10-10: pypowerwall-server style (JSON body + Bearer token)
+        if request.content_type == "application/json":
+            body = await request.json()
+            self.json_posts.append((path, body, request.headers.get("Authorization")))
+            if request.headers.get("Authorization") != f"Bearer {self.control_secret}":
+                return web.json_response({"detail": "Invalid token"}, status=401)
+            if path in self.post_status:
+                status, payload = self.post_status[path]
+                return web.json_response(payload, status=status)
+            return web.json_response({"result": 1} if path == "/control/islanding" else {"ok": True})
         form = dict(await request.post())
         self.posts.append((path, form))
         if self.control_secret is None:

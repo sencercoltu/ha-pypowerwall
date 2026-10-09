@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import PyPowerwallCoordinator
+from .payload import parse_pod_groups  # 2026-10-10
 
 GATEWAY_MODELS = {
     "1118431": "Backup Gateway 1",
@@ -134,31 +135,57 @@ def build_device_labels(
     return labels
 
 
+# [OLD 2026-10-10] replaced: grouped each PWn_ block under its PackageSerialNumber,
+# but the proxy fills the POD_* fields of PWn from the n-th *vitals TEPOD* entry,
+# which is a different Powerwall whenever vitals and battery_blocks are ordered
+# differently (they are on real systems). Delete this block when happy.
+# def parse_pod_data(pod_data: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+#     """Parse flat /pod response into per-powerwall dicts.
+#
+#     The /pod endpoint returns a flat dict with PW1_, PW2_ prefixed keys.
+#     Returns {serial: {key_without_prefix: value, ...}} for each group.
+#     """
+#     if not pod_data:
+#         return {}
+#
+#     result: dict[str, dict[str, Any]] = {}
+#     prefixes: set[str] = set()
+#     for key in pod_data:
+#         if key.startswith("PW") and "_" in key:
+#             prefix = key[: key.index("_") + 1]
+#             prefixes.add(prefix)
+#
+#     for prefix in sorted(prefixes):
+#         pw_data: dict[str, Any] = {}
+#         for key, value in pod_data.items():
+#             if key.startswith(prefix):
+#                 pw_data[key[len(prefix) :]] = value
+#         serial = pw_data.get("PackageSerialNumber", "")
+#         if serial:
+#             result[serial] = pw_data
+#
+#     return result
+# [/OLD 2026-10-10]
 def parse_pod_data(pod_data: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Parse flat /pod response into per-powerwall dicts.
+    """Parse flat /pod response into per-powerwall dicts keyed by serial.
 
-    The /pod endpoint returns a flat dict with PW1_, PW2_ prefixed keys.
-    Returns {serial: {key_without_prefix: value, ...}} for each group.
+    Block fields (PackageSerialNumber, wobble_detected, ...) belong to the serial
+    in PWn_PackageSerialNumber; POD_* fields belong to the serial in PWn_name
+    (TEPOD--part--serial). Prefix stripped from every key.
     """
-    if not pod_data:
-        return {}
-
     result: dict[str, dict[str, Any]] = {}
-    prefixes: set[str] = set()
-    for key in pod_data:
-        if key.startswith("PW") and "_" in key:
-            prefix = key[: key.index("_") + 1]
-            prefixes.add(prefix)
-
-    for prefix in sorted(prefixes):
-        pw_data: dict[str, Any] = {}
-        for key, value in pod_data.items():
-            if key.startswith(prefix):
-                pw_data[key[len(prefix) :]] = value
-        serial = pw_data.get("PackageSerialNumber", "")
-        if serial:
-            result[serial] = pw_data
-
+    for group in parse_pod_groups(pod_data):
+        block_serial = group.get("PackageSerialNumber")
+        if block_serial:
+            target = result.setdefault(block_serial, {})
+            for k, v in group.items():
+                if not k.startswith("POD_"):
+                    target[k] = v
+        name = group.get("name")
+        name_serial = name.rsplit("--", 1)[-1] if isinstance(name, str) and "--" in name else None
+        if name_serial:
+            target = result.setdefault(name_serial, {})
+            target.update({k: v for k, v in group.items() if k.startswith("POD_")})
     return result
 
 
@@ -175,3 +202,17 @@ def device_identifier(entry_id: str, serial: str) -> tuple[str, str]:
     if serial == TESYNC_PLACEHOLDER:
         return (DOMAIN, f"{entry_id}_{TESYNC_PLACEHOLDER}")
     return (DOMAIN, serial)
+
+
+def powerwall_device_info(
+    entry_id: str, serial: str, part_number: str | None, label: str
+) -> DeviceInfo:
+    """DeviceInfo for one Powerwall / expansion pack, same shape as the vitals sensors. 2026-10-10."""
+    return DeviceInfo(
+        identifiers={device_identifier(entry_id, serial)},
+        name=f"Powerwall {serial[-4:]} ({label})",
+        manufacturer="Tesla",
+        model=part_number or None,
+        serial_number=serial,
+        via_device=(DOMAIN, entry_id),
+    )

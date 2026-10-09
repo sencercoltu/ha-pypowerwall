@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,  # 2026-10-10
+    SensorStateClass,
+)
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -19,6 +24,7 @@ from .entity import (
     build_device_labels,
     device_identifier,
     parse_vitals_key,
+    powerwall_device_info,  # 2026-10-10
 )
 from .sensor_descriptions import (
     ENERGY_SENSOR_KEYS,
@@ -26,9 +32,12 @@ from .sensor_descriptions import (
     INVERTER_SENSORS,
     ISLAND_SENSORS,
     MAIN_SENSORS,
+    PACK_SENSORS,  # 2026-10-10
     POD_SENSORS,
     PVAC_OUTPUT_SENSORS,
+    REMOTE_METER_FIELDS,  # 2026-10-10
     STRING_FIELDS,
+    UNIT_SIGNAL_SENSORS,  # 2026-10-10
     PyPowerwallSensorDescription,
     VitalsSensorDescription,
 )
@@ -226,6 +235,169 @@ class PyPowerwallStringStateSensor(PyPowerwallEntity, SensorEntity):
 
 
 # ---------------------------------------------------------------------------
+#  2026-10-10: per-pack, per-unit (temperatures / fans) and remote meter sensors
+# ---------------------------------------------------------------------------
+class PyPowerwallPackSensor(PyPowerwallEntity, SensorEntity):
+    """Value from data["packs"][serial] (battery_blocks merged with /pod)."""
+
+    entity_description: VitalsSensorDescription
+
+    def __init__(
+        self,
+        coordinator: PyPowerwallCoordinator,
+        entry_id: str,
+        serial: str,
+        part_number: str | None,
+        label: str,
+        description: VitalsSensorDescription,
+        enabled_default: bool,
+    ) -> None:
+        super().__init__(coordinator, entry_id)
+        self._serial = serial
+        self.entity_description = description
+        self._attr_unique_id = f"{entry_id}_{serial}_{description.key}"
+        self._attr_entity_registry_enabled_default = enabled_default
+        self._attr_device_info = powerwall_device_info(entry_id, serial, part_number, label)
+
+    @property
+    def native_value(self) -> StateType:
+        try:
+            return self.entity_description.value_fn(self.coordinator.data["packs"][self._serial])
+        except (KeyError, TypeError, ZeroDivisionError):
+            return None
+
+
+class PyPowerwallUnitSignalSensor(PyPowerwallEntity, SensorEntity):
+    """Powerwall temperature / fan reading from data["unit_signals"][serial][metric]."""
+
+    def __init__(
+        self,
+        coordinator: PyPowerwallCoordinator,
+        entry_id: str,
+        serial: str,
+        part_number: str | None,
+        label: str,
+        metric: str,
+        description: SensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, entry_id)
+        self._serial = serial
+        self._metric = metric
+        self.entity_description = description
+        self._attr_unique_id = f"{entry_id}_{serial}_{metric}"
+        self._attr_device_info = powerwall_device_info(entry_id, serial, part_number, label)
+
+    @property
+    def native_value(self) -> StateType:
+        try:
+            return self.coordinator.data["unit_signals"][self._serial].get(self._metric)
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+
+class PyPowerwallRemoteMeterSensor(PyPowerwallEntity, SensorEntity):
+    """One CT reading of a Tesla remote meter (TRM) or Neurio meter."""
+
+    def __init__(
+        self,
+        coordinator: PyPowerwallCoordinator,
+        entry_id: str,
+        ident: str,
+        kind: str,
+        ct: str,
+        location: str | None,
+        field: tuple,
+    ) -> None:
+        super().__init__(coordinator, entry_id)
+        key, label, metric, unit, device_class, state_class, convert, enabled, _kinds = field
+        self._ident = ident
+        self._ct = ct
+        self._metric = metric
+        self._convert = convert
+        self._attr_unique_id = f"{entry_id}_{ident}_ct{ct}_{key}"
+        where = f" {location.replace('_', ' ').title()}" if location else ""
+        self._attr_name = f"CT{ct}{where} {label}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_state_class = state_class
+        self._attr_entity_registry_enabled_default = enabled
+        short = ident.rsplit("--", 1)[-1] or ident
+        self._attr_device_info = DeviceInfo(
+            identifiers={device_identifier(entry_id, ident)},
+            name=f"{'Remote Meter' if kind == 'trm' else 'Neurio Meter'} {short[-6:]}",
+            manufacturer="Tesla" if kind == "trm" else "Neurio",
+            model="Tesla Remote Meter" if kind == "trm" else "Neurio W2",
+            serial_number=short,
+            via_device=(DOMAIN, entry_id),
+        )
+
+    @property
+    def native_value(self) -> StateType:
+        try:
+            value = self.coordinator.data["remote_meters"][self._ident]["cts"][self._ct].get(self._metric)
+        except (KeyError, TypeError, AttributeError):
+            return None
+        return self._convert(value) if self._convert else value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        try:
+            loc = self.coordinator.data["remote_meters"][self._ident]["cts"][self._ct].get("Location")
+        except (KeyError, TypeError, AttributeError):
+            return None
+        return {"location": loc} if loc else None
+
+
+def _extra_sensors(
+    coordinator: PyPowerwallCoordinator, entry_id: str, device_labels: dict[str, str]
+) -> list[SensorEntity]:
+    """2026-10-10: per-pack, temperature/fan and remote meter entities."""
+    data = coordinator.data or {}
+    entities: list[SensorEntity] = []
+    packs = data.get("packs") or {}
+    parts: dict[str, str] = {}
+    for vkey in data.get("vitals") or {}:
+        if vkey.startswith(("TEPOD", "TEPINV", "TETHC", "PVAC")):
+            part, serial = parse_vitals_key(vkey)
+            parts.setdefault(serial, part)
+
+    for serial, pack in packs.items():
+        part = pack.get("PackagePartNumber") or parts.get(serial)
+        label = device_labels.get(serial, "Expansion" if "Expansion" in str(pack.get("Type")) else "Primary")
+        for desc in PACK_SENSORS:
+            try:
+                has_value = desc.value_fn(pack) is not None
+            except (KeyError, TypeError):
+                has_value = False
+            enabled = has_value and desc.entity_registry_enabled_default
+            entities.append(
+                PyPowerwallPackSensor(coordinator, entry_id, serial, part, label, desc, enabled)
+            )
+
+    for serial, signals in (data.get("unit_signals") or {}).items():
+        part = parts.get(serial) or (packs.get(serial) or {}).get("PackagePartNumber")
+        label = device_labels.get(serial, "Primary")
+        for metric in signals:
+            desc = UNIT_SIGNAL_SENSORS.get(metric)
+            if desc is not None:
+                entities.append(
+                    PyPowerwallUnitSignalSensor(coordinator, entry_id, serial, part, label, metric, desc)
+                )
+
+    for ident, meter in (data.get("remote_meters") or {}).items():
+        kind = meter.get("kind")
+        for ct, fields in (meter.get("cts") or {}).items():
+            for field in REMOTE_METER_FIELDS:
+                if kind in field[8] and field[2] in fields:
+                    entities.append(
+                        PyPowerwallRemoteMeterSensor(
+                            coordinator, entry_id, ident, kind, ct, fields.get("Location"), field
+                        )
+                    )
+    return entities
+
+
+# ---------------------------------------------------------------------------
 #  Platform setup
 # ---------------------------------------------------------------------------
 async def async_setup_entry(
@@ -392,6 +564,8 @@ async def async_setup_entry(
                     device_name="Sync Controller",
                 )
             )
+
+    entities.extend(_extra_sensors(coordinator, entry_id, device_labels))  # 2026-10-10
 
     _LOGGER.info("Setting up %d PyPowerwall sensor entities", len(entities))
     async_add_entities(entities)

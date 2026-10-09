@@ -2,7 +2,13 @@
   "entity": {
     "binary_sensor": {
       "proxy_fallback": { "default": "mdi:server-network-off", "state": { "off": "mdi:server-network" } },
-      "transport": { "default": "mdi:lan-disconnect", "state": { "on": "mdi:lan-connect" } }
+      "transport": { "default": "mdi:lan-disconnect", "state": { "on": "mdi:lan-connect" } },
+      "grid_charging_allowed": { "default": "mdi:transmission-tower-off", "state": { "on": "mdi:transmission-tower-import" } },
+      "gateways_online": { "default": "mdi:lan-disconnect", "state": { "on": "mdi:lan-connect" } }
+    },
+    "button": {
+      "go_off_grid": { "default": "mdi:transmission-tower-off" },
+      "reconnect_grid": { "default": "mdi:transmission-tower" }
     }
   },
   "services": {
@@ -11,6 +17,8 @@
     "set_grid_export": { "service": "mdi:transmission-tower-export" },
     "set_grid_charging": { "service": "mdi:transmission-tower-import" },
     "start_max_backup": { "service": "mdi:battery-arrow-up" },
-    "cancel_max_backup": { "service": "mdi:battery-off" }
+    "cancel_max_backup": { "service": "mdi:battery-off" },
+    "go_off_grid": { "service": "mdi:transmission-tower-off" },
+    "reconnect_grid": { "service": "mdi:transmission-tower" }
   }
 }

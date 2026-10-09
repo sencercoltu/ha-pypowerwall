@@ -262,6 +262,117 @@
       },
       "proxy_data_age": {
         "name": "Antigüedad de datos del proxy"
+      },
+      "battery_level_app": {
+        "name": "Nivel de batería (app)"
+      },
+      "grid_export_policy": {
+        "name": "Política de exportación a la red"
+      },
+      "grid_l3_power": {
+        "name": "Potencia L3"
+      },
+      "grid_l3_voltage": {
+        "name": "Voltaje L3"
+      },
+      "grid_l3_current": {
+        "name": "Corriente L3"
+      },
+      "grid_l3_reactive_power": {
+        "name": "Potencia reactiva L3"
+      },
+      "island_freq_l3_main": {
+        "name": "Frecuencia principal L3"
+      },
+      "island_freq_l3_load": {
+        "name": "Frecuencia de carga L3"
+      },
+      "island_voltage_l3_main": {
+        "name": "Voltaje principal L3"
+      },
+      "island_voltage_l3_load": {
+        "name": "Voltaje de carga L3"
+      },
+      "meter_x_power": {
+        "name": "Potencia medidor X"
+      },
+      "meter_x_energy_import": {
+        "name": "Energía importada medidor X"
+      },
+      "meter_x_energy_export": {
+        "name": "Energía exportada medidor X"
+      },
+      "meter_y_power": {
+        "name": "Potencia medidor Y"
+      },
+      "meter_y_energy_import": {
+        "name": "Energía importada medidor Y"
+      },
+      "meter_y_energy_export": {
+        "name": "Energía exportada medidor Y"
+      },
+      "pack_available_charge_power": {
+        "name": "Potencia de carga disponible"
+      },
+      "pack_available_discharge_power": {
+        "name": "Potencia de descarga disponible"
+      },
+      "pack_energy_charged": {
+        "name": "Energía cargada"
+      },
+      "pack_energy_discharged": {
+        "name": "Energía descargada"
+      },
+      "pack_output_voltage": {
+        "name": "Voltaje de salida"
+      },
+      "pack_output_current": {
+        "name": "Corriente de salida"
+      },
+      "pack_output_frequency": {
+        "name": "Frecuencia de salida"
+      },
+      "pack_grid_state": {
+        "name": "Estado de red del inversor"
+      },
+      "pack_op_seq_state": {
+        "name": "Estado de secuencia de operación"
+      },
+      "pack_firmware_version": {
+        "name": "Versión de firmware"
+      },
+      "pack_temp_max": {
+        "name": "Temperatura del paquete (máx.)"
+      },
+      "pack_temp_min": {
+        "name": "Temperatura del paquete (mín.)"
+      },
+      "shunt_temp": {
+        "name": "Temperatura del shunt"
+      },
+      "inverter_ambient": {
+        "name": "Temperatura ambiente del inversor"
+      },
+      "controller_ambient": {
+        "name": "Temperatura del controlador térmico"
+      },
+      "fan_a_rpm": {
+        "name": "Velocidad ventilador A"
+      },
+      "fan_b_rpm": {
+        "name": "Velocidad ventilador B"
+      },
+      "fan_rpm": {
+        "name": "Velocidad del ventilador"
+      },
+      "fan_target_rpm": {
+        "name": "Velocidad objetivo del ventilador"
+      },
+      "fan_a_duty": {
+        "name": "Ciclo ventilador A"
+      },
+      "fan_b_duty": {
+        "name": "Ciclo ventilador B"
       }
     },
     "binary_sensor": {
@@ -318,6 +429,18 @@
       },
       "transport": {
         "name": "Transporte {transport}"
+      },
+      "pod_off_grid": {
+        "name": "Fuera de la red"
+      },
+      "pod_vf_mode": {
+        "name": "Modo VF"
+      },
+      "grid_charging_allowed": {
+        "name": "Carga desde la red permitida"
+      },
+      "gateways_online": {
+        "name": "Gateways en línea"
       }
     },
     "number": {
@@ -365,6 +488,14 @@
             }
           }
         }
+      }
+    },
+    "button": {
+      "go_off_grid": {
+        "name": "Desconectar de la red"
+      },
+      "reconnect_grid": {
+        "name": "Reconectar a la red"
       }
     }
   },
@@ -448,6 +579,30 @@
           "description": "Qué proxy pypowerwall usar (solo necesario con más de uno)."
         }
       }
+    },
+    "go_off_grid": {
+      "name": "Desconectar de la red",
+      "description": "Desconecta el sitio de la red (modo isla). Solo pypowerwall-server con gateway v1r.",
+      "fields": {
+        "confirm": {
+          "name": "Confirmar",
+          "description": "Debe ser true: el sitio pasa realmente a la batería."
+        },
+        "config_entry_id": {
+          "name": "Entrada PyPowerwall",
+          "description": "Qué proxy pypowerwall usar (solo necesario con más de uno)."
+        }
+      }
+    },
+    "reconnect_grid": {
+      "name": "Reconectar a la red",
+      "description": "Reconecta el sitio a la red tras el modo isla. Solo pypowerwall-server con gateway v1r.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Entrada PyPowerwall",
+          "description": "Qué proxy pypowerwall usar (solo necesario con más de uno)."
+        }
+      }
     }
   },
   "selector": {
@@ -488,6 +643,15 @@
     },
     "max_backup_unsupported": {
       "message": "El respaldo máximo no está disponible en pypowerwall-server; solo lo admite el proxy pypowerwall (transporte LAN v1r)."
+    },
+    "islanding_unsupported": {
+      "message": "Desconectar / reconectar la red solo está disponible en pypowerwall-server (transporte v1r LAN)."
+    },
+    "islanding_confirm": {
+      "message": "Indica confirm: true para desconectar el sitio de la red."
+    },
+    "islanding_failed": {
+      "message": "El comando de modo isla falló: {error}. Comprueba el estado de la red antes de reintentar."
     }
   }
 }

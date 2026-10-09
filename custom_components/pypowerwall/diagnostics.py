@@ -36,6 +36,7 @@ async def async_get_config_entry_diagnostics(
             if coordinator.update_interval
             else None,
             "has_control_secret": coordinator.has_control_secret,
+            "backend": coordinator.backend,  # 2026-10-10: proxy / server
         },
         "data": async_redact_data(coordinator.data or {}, TO_REDACT),
     }

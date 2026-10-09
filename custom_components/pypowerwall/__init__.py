@@ -18,6 +18,7 @@ from .entity import TESYNC_PLACEHOLDER, device_identifier
 from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [
+    Platform.BUTTON,  # 2026-10-10: islanding (pypowerwall-server)
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.EVENT,

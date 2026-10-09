@@ -86,3 +86,25 @@ cancel_max_backup:
       selector:
         config_entry:
           integration: pypowerwall
+
+# 2026-10-10: islanding (pypowerwall-server with a v1r gateway only)
+go_off_grid:
+  fields:
+    confirm:
+      required: true
+      example: true
+      selector:
+        boolean:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: pypowerwall
+
+reconnect_grid:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: pypowerwall

@@ -21,6 +21,8 @@ Home Assistant ──HTTP──▶ pypowerwall proxy (:8675) ──▶ Tesla gat
 | `event.py` | `alert_fired` / `alert_cleared` events by diffing vitals alerts between refreshes. |
 | `services.py`, `services.yaml` | Parameterised control services for automations. |
 | `config_flow.py` | User / reconfigure / reauth / options flows; validates the control secret against the proxy. |
+| `payload.py` | Pure helpers: backend-neutral `/health` parsing, raw/app battery level, per-pack merge, temperature/fan signals, remote meters. |
+| `button.py` | Go off grid / reconnect grid (pypowerwall-server only, disabled by default). |
 | `entity.py` | Base entity, gateway `DeviceInfo`, vitals key parsing, Primary/Follower/Expansion labelling, `/pod` parsing. |
 | `diagnostics.py` | Redacted diagnostics download. |
 | `brand/` | `icon.png` / `icon@2x.png` served by HA ≥ 2026.3 (`/api/brands/integration/pypowerwall/icon.png`). |
@@ -33,7 +35,9 @@ Declared once in `coordinator.ENDPOINTS` as `(key, path, required)`:
 - **Optional** (404/error → `None`, dict-shaped keys default to `{}`): `/json`, `/version`,
   `/api/operation`, `/api/system_status`, `/api/sitemaster`, `/pod`, `/api/troubleshooting/problems`,
   `/stats`, `/api/status`, `/api/system_status/grid_status`, `/api/meters/site`, `/api/meters/solar`,
-  `/control/grid_charging`, `/control/grid_export`, `/control/max_backup`.
+  `/control/grid_charging`, `/control/grid_export`, `/control/max_backup`, `/fans`.
+- **Proxy-only** (`PROXY_ONLY_KEYS`, never requested from pypowerwall-server, which only has
+  `POST /control/*`): `/control/grid_charging`, `/control/grid_export`, `/control/max_backup`.
 - **Slow-polled** (`SLOW_POLL_KEYS`, every `SLOW_POLL_EVERY` = 10 refreshes, value carried over in
   between): `/version`, `/api/status`, `/stats`, `/api/sitemaster`, `/api/troubleshooting/problems`,
   `/api/meters/solar`.
@@ -41,6 +45,22 @@ Declared once in `coordinator.ENDPOINTS` as `(key, path, required)`:
 - `/control/max_backup` is fetched with `?token=<secret>`: per the proxy source a plain GET is
   read-only, while a token-authenticated GET makes the proxy cancel expired manual-backup events the
   gateway leaves lingering. The query string is stripped from every log line / exception.
+
+## Derived data (`payload.py`)
+
+After each refresh the coordinator adds three structures built by pure helpers in `payload.py`:
+
+- `data["packs"]` — `{serial: {...}}`: `system_status.battery_blocks` merged with `/pod`. The proxy's
+  `/pod` numbers `PWn_POD_*` by **vitals TEPOD order** but `PWn_PackageSerialNumber` and the block
+  fields by **battery_blocks order**; the two differ on real systems, so `POD_*` fields are matched by
+  the serial in `PWn_name` and block fields by `PWn_PackageSerialNumber`.
+- `data["unit_signals"]` — `{serial: {metric: value}}`: temperatures and fans, same metric ids as
+  pypowerwall-server's MQTT discovery (`pack_temp_max`, `fan_a_rpm`, …). Vitals first, `/fans` fills
+  gaps (PW2/+ PVAC fans are only there).
+- `data["remote_meters"]` — `TRM--<din>` / `NEURIO--<sn>` vitals blocks regrouped per CT.
+
+`/health` differs per backend (`connection_health` / flat `fallback_mode` on the proxy, `status` /
+per-gateway `fallback_mode` on the server); `payload.health_degraded` / `health_fallback` hide that.
 
 ## Things learned from real payloads (why the code looks the way it does)
 
@@ -62,6 +82,9 @@ Declared once in `coordinator.ENDPOINTS` as `(key, path, required)`:
   token first and, on success, just return the current mode — nothing changes. Used by the config,
   options and reauth flows (`invalid_auth` / `control_unsupported`).
 - **DIN**: `1707000-21-K--TG…` = part number `--` serial; part-number prefix → gateway model.
+- **Units**: `PINV_Pout` (vitals) is kW; `PVAC_Pout` is W. `/json.soe` is the *raw* level on the proxy
+  and the *app-scaled* level on pypowerwall-server (raw in `soe_raw`). Remote meter energy is in
+  watt-seconds (`EnergyImportedWs`).
 - **`battery_blocks` type**: `"BatteryExpansion"` for expansion packs, `""` for the leader on some
   firmwares.
 

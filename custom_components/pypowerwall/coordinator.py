@@ -16,14 +16,33 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+# [OLD 2026-10-10] replaced: two separate `from .const import` blocks fail ruff's
+# isort check (I001) in CI; merged into one below. Delete this block when happy.
+# from .const import (
+#     CONF_MAX_BACKUP_MINUTES,
+#     CONF_PACK_COUNT,
+#     DEFAULT_MAX_BACKUP_MINUTES,
+#     DEFAULT_SCAN_INTERVAL,
+#     DOMAIN,
+# )
+# from .const import BACKEND_PROXY, BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
+# [/OLD 2026-10-10]
 from .const import (
+    BACKEND_PROXY,  # 2026-09-29: pypowerwall-server support
+    BACKEND_SERVER,
     CONF_MAX_BACKUP_MINUTES,
     CONF_PACK_COUNT,
     DEFAULT_MAX_BACKUP_MINUTES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
-from .const import BACKEND_PROXY, BACKEND_SERVER  # 2026-09-29: pypowerwall-server support
+from .payload import (  # 2026-10-10: derived per-pack / per-unit / remote-meter data
+    build_packs,
+    build_remote_meters,
+    build_unit_signals,
+    health_degraded,
+    health_fallback,
+)
 from .sensor_descriptions import observed_pack_count
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +71,8 @@ ENDPOINTS: tuple[tuple[str, str, bool], ...] = (
     ("control_grid_charging", "/control/grid_charging", False),
     ("control_grid_export", "/control/grid_export", False),
     ("control_max_backup", "/control/max_backup", False),
+    # 2026-10-10: fan speeds (Powerwall 2/+ PVAC fans only show up here, not in /vitals)
+    ("fans", "/fans", False),
 )
 
 # Keys whose value should default to {} rather than None when missing.
@@ -291,6 +312,10 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 2026-09-29: keep following /health in case the host:port now runs the other backend
         self._backend = detect_backend(data["health"]) or self._backend
         data["pack_count"] = self._sticky_pack_count(data)
+        # 2026-10-10: derived structures shared by the per-pack / per-unit / meter entities
+        data["packs"] = build_packs(data)
+        data["unit_signals"] = build_unit_signals(data.get("vitals"), data.get("fans"))
+        data["remote_meters"] = build_remote_meters(data.get("vitals"))
         self._update_repairs(data)
         return data
 
@@ -310,8 +335,13 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _update_repairs(self, data: dict[str, Any]) -> None:
         """Raise / clear repair issues from /health."""
         health = data.get("health") or {}
-        degraded = bool((health.get("connection_health") or {}).get("is_degraded"))
-        fallback = bool((health.get("fallback_mode") or {}).get("is_fallback_mode"))
+        # [OLD 2026-10-10] replaced: only understood the proxy's /health shape, so
+        # with pypowerwall-server neither issue could ever be raised. Delete when happy.
+        # degraded = bool((health.get("connection_health") or {}).get("is_degraded"))
+        # fallback = bool((health.get("fallback_mode") or {}).get("is_fallback_mode"))
+        # [/OLD 2026-10-10]
+        degraded = bool(health_degraded(health))
+        fallback = bool(health_fallback(health))
         self._set_issue("proxy_degraded", degraded, {"host": self.host})
         self._set_issue("proxy_fallback", fallback, {"host": self.host})
 
@@ -442,6 +472,50 @@ class PyPowerwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         self._schedule_settle_refresh()
         return True
+
+    # ------------------------------------------------ islanding (2026-10-10)
+    @property
+    def supports_islanding(self) -> bool:
+        """Only pypowerwall-server exposes POST /control/islanding (v1r gateways)."""
+        return self.is_server
+
+    async def send_islanding(self, action: str) -> str | None:
+        """Ask pypowerwall-server to go off grid / reconnect. Returns an error text or None.
+
+          curl -X POST -H "Authorization: Bearer SECRET" -H "Content-Type: application/json" \\
+               -d '{"value": "off_grid", "confirm": true}' http://host:port/control/islanding
+
+        The server answers 409 (command in progress), 429 (cooldown), 503 (no v1r)
+        or 502 (not acknowledged); none of those may be retried blindly.
+        """
+        if action not in ("off_grid", "on_grid"):
+            return f"invalid islanding action {action!r}"
+        if not self._control_secret:
+            return "control secret not configured"
+        if not self.supports_islanding:
+            return "islanding is only available on pypowerwall-server"
+        url = f"{self._base_url}/control/islanding"
+        payload: dict[str, Any] = {"value": action}
+        if action == "off_grid":
+            payload["confirm"] = True
+        headers = {"Authorization": f"Bearer {self._control_secret}"}
+        _LOGGER.debug("POST %s json=%s (pypowerwall-server)", url, payload)
+        try:
+            async with self._session.post(
+                url, json=payload, headers=headers, timeout=SERVER_WRITE_TIMEOUT
+            ) as resp:
+                detail = _error_detail(await resp.text())
+                if resp.status >= 400:
+                    _LOGGER.error("POST %s failed (HTTP %s): %s", url, resp.status, detail)
+                    return f"HTTP {resp.status}: {detail}" if detail else f"HTTP {resp.status}"
+                if detail.startswith("error:"):
+                    _LOGGER.error("POST %s returned an error: %s", url, detail)
+                    return detail
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error("POST %s failed: %s", url, err)
+            return str(err) or type(err).__name__
+        self._schedule_settle_refresh()
+        return None
 
     def _schedule_settle_refresh(self) -> None:
         """Refresh again once pypowerwall-server has re-polled the gateway."""
