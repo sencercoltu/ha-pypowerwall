@@ -26,6 +26,7 @@ from .entity import (
     parse_vitals_key,
     powerwall_device_info,  # 2026-10-10
 )
+from .payload import troubleshooting_problems  # 2026-10-10
 from .sensor_descriptions import (
     ENERGY_SENSOR_KEYS,
     GRID_METER_SENSORS,
@@ -43,6 +44,20 @@ from .sensor_descriptions import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# 2026-10-10: created only when the backend has real data for them at setup
+# (pypowerwall serves canned / stub values for these on TEDAPI, cloud and server)
+REAL_DATA_ONLY_KEYS = frozenset(
+    {
+        "troubleshooting_problems",
+        "battery_target_power",
+        "instantaneous_max_charge_power",
+        "instantaneous_max_discharge_power",
+        "inverter_nominal_usable_power",
+        "gateway_uptime",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +97,16 @@ class PyPowerwallSensor(PyPowerwallEntity, SensorEntity):
             except (KeyError, TypeError):
                 return None
         if self.entity_description.key == "troubleshooting_problems":
-            try:
-                problems = self.coordinator.data.get("troubleshooting") or []
-                return {"problems": problems}
-            except (KeyError, TypeError):
-                return None
+            # [OLD 2026-10-10] replaced: exposed the raw {"problems": [...]} dict (canned on
+            # TEDAPI / cloud / pypowerwall-server). Delete when happy.
+            # try:
+            #     problems = self.coordinator.data.get("troubleshooting") or []
+            #     return {"problems": problems}
+            # except (KeyError, TypeError):
+            #     return None
+            # [/OLD 2026-10-10]
+            problems = troubleshooting_problems(self.coordinator.data or {})
+            return {"problems": problems} if problems is not None else None
         return None
 
 
@@ -411,7 +431,11 @@ async def async_setup_entry(
 
     # --- Main device sensors ---
     for desc in MAIN_SENSORS:
-        if desc.key in ENERGY_SENSOR_KEYS:
+        # [OLD 2026-10-10] extended: also skip sensors whose source is canned / stub data
+        # on this backend (see REAL_DATA_ONLY_KEYS). Delete when happy.
+        # if desc.key in ENERGY_SENSOR_KEYS:
+        # [/OLD 2026-10-10]
+        if desc.key in ENERGY_SENSOR_KEYS or desc.key in REAL_DATA_ONLY_KEYS:
             try:
                 has_data = desc.value_fn(coordinator.data) is not None
             except (KeyError, TypeError, AttributeError):

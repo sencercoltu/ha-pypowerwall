@@ -25,11 +25,13 @@ from .entity import (
     parse_vitals_key,
 )
 from .payload import (  # 2026-10-10
+    connected_to_tesla,
     health_degraded,
     health_fallback,
     health_fallback_details,
     is_server_health,
     server_gateways_online,
+    system_status_is_stub,
 )
 
 # ---------------------------------------------------------------------------
@@ -58,14 +60,30 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data.coordinator
     entry_id = entry.entry_id
+    # [OLD 2026-10-10] replaced: Grid Fault and Connected to Tesla were always created,
+    # but on TEDAPI / cloud / pypowerwall-server their sources are canned (grid_faults
+    # is always [] in the system_status stub, /api/sitemaster always "connected").
+    # Delete this block when happy.
+    # entities: list[BinarySensorEntity] = [
+    #     PyPowerwallGridConnected(coordinator, entry_id),
+    #     PyPowerwallGridFault(coordinator, entry_id),
+    #     PyPowerwallProxyDegraded(coordinator, entry_id),
+    #     PyPowerwallProxyFallback(coordinator, entry_id),
+    #     PyPowerwallConnectedToTesla(coordinator, entry_id),
+    #     PyPowerwallAlertsActive(coordinator, entry_id),
+    # ]
+    # [/OLD 2026-10-10]
     entities: list[BinarySensorEntity] = [
         PyPowerwallGridConnected(coordinator, entry_id),
-        PyPowerwallGridFault(coordinator, entry_id),
         PyPowerwallProxyDegraded(coordinator, entry_id),
         PyPowerwallProxyFallback(coordinator, entry_id),
-        PyPowerwallConnectedToTesla(coordinator, entry_id),
         PyPowerwallAlertsActive(coordinator, entry_id),
     ]
+    data = coordinator.data or {}
+    if data.get("system_status") and not system_status_is_stub(data.get("system_status")):
+        entities.append(PyPowerwallGridFault(coordinator, entry_id))
+    if connected_to_tesla(data) is not None:
+        entities.append(PyPowerwallConnectedToTesla(coordinator, entry_id))
     entities.extend(PyPowerwallTransport(coordinator, entry_id, n) for n in transport_names(coordinator))
     # 2026-10-10: read-only grid charging state (works without a control secret on
     # pypowerwall-server) and the server's gateway-online status
@@ -165,10 +183,25 @@ class PyPowerwallGridConnected(PyPowerwallEntity, BinarySensorEntity):
             # disconnected (None == 1 -> False) instead of unknown. Delete when happy.
             # return self.coordinator.data["json"].get("grid_status") == 1
             # [/OLD 2026-10-10]
+            # [OLD 2026-10-10 (2)] replaced: /json.grid_status is int(grid_status() == "UP"),
+            # so a failed gateway call also became 0 = "disconnected". The integration
+            # already polls /api/system_status/grid_status, which carries the real state.
+            # Delete when happy.
+            # status = self.coordinator.data["json"].get("grid_status")
+            # return None if status is None else status == 1
+            # [/OLD 2026-10-10 (2)]
+            gs = (self.coordinator.data.get("grid_status") or {}).get("grid_status")
+            if isinstance(gs, str) and gs.startswith("System"):
+                return gs == "SystemGridConnected"
             status = self.coordinator.data["json"].get("grid_status")
             return None if status is None else status == 1
         except (KeyError, TypeError, AttributeError):
             return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        gs = (self.coordinator.data.get("grid_status") or {}).get("grid_status")
+        return {"grid_status": gs} if gs else None
 
 
 class PyPowerwallGridFault(PyPowerwallEntity, BinarySensorEntity):
@@ -181,11 +214,19 @@ class PyPowerwallGridFault(PyPowerwallEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        try:
-            faults = self.coordinator.data["system_status"].get("grid_faults", [])
-            return len(faults) > 0
-        except (KeyError, TypeError):
+        # [OLD 2026-10-10] replaced: the TEDAPI system_status stub always has
+        # grid_faults = [] -> "no fault" was fabricated. Delete when happy.
+        # try:
+        #     faults = self.coordinator.data["system_status"].get("grid_faults", [])
+        #     return len(faults) > 0
+        # except (KeyError, TypeError):
+        #     return None
+        # [/OLD 2026-10-10]
+        ss = self.coordinator.data.get("system_status")
+        if not isinstance(ss, dict) or system_status_is_stub(ss):
             return None
+        faults = ss.get("grid_faults")
+        return None if faults is None else len(faults) > 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -259,10 +300,14 @@ class PyPowerwallConnectedToTesla(PyPowerwallEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        try:
-            return self.coordinator.data["sitemaster"].get("connected_to_tesla")
-        except (KeyError, TypeError):
-            return None
+        # [OLD 2026-10-10] replaced: /api/sitemaster is canned on TEDAPI / cloud /
+        # pypowerwall-server (always "connected"). Delete when happy.
+        # try:
+        #     return self.coordinator.data["sitemaster"].get("connected_to_tesla")
+        # except (KeyError, TypeError):
+        #     return None
+        # [/OLD 2026-10-10]
+        return connected_to_tesla(self.coordinator.data or {})
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

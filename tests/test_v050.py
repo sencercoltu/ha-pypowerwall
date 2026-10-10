@@ -117,10 +117,23 @@ def test_pod_flags_are_matched_by_serial_not_position():
     assert parsed["TG0000000002BB"]["wobble_detected"] == 1
     assert parsed[EXPANSION]["wobble_detected"] == 0
 
-    packs = build_packs({"pod": pod, "system_status": load_fixture("api_system_status.json"), "vitals": {}})
+    # [OLD 2026-10-10 (2)] replaced: packs no longer take flags from /pod at all
+    # (the proxy reports a missing flag as 0). Delete when happy.
+    # packs = build_packs({"pod": pod, "system_status": load_fixture("api_system_status.json"), "vitals": {}})
+    # assert packs[EXPANSION]["POD_ActiveHeating"] == 1
+    # assert packs["TG0000000002BB"]["POD_ActiveHeating"] == 0
+    # assert packs["TG0000000002BB"]["wobble_detected"] == 1
+    # [/OLD 2026-10-10 (2)]
+    ss = load_fixture("api_system_status.json")
+    packs = build_packs({"pod": pod, "system_status": ss, "vitals": {}})
+    assert "POD_ActiveHeating" not in packs[EXPANSION]  # /pod's coerced 0/1 is not trusted
+    assert "wobble_detected" not in packs["TG0000000002BB"]
+    assert packs[EXPANSION]["PackagePartNumber"]  # pass-through fields still merged
+    vitals = {f"TEPOD--1807000-20-B--{EXPANSION}": {"POD_ActiveHeating": 1}}
+    ss["battery_blocks"][1]["wobble_detected"] = True
+    packs = build_packs({"pod": pod, "system_status": ss, "vitals": vitals})
     assert packs[EXPANSION]["POD_ActiveHeating"] == 1
-    assert packs["TG0000000002BB"]["POD_ActiveHeating"] == 0
-    assert packs["TG0000000002BB"]["wobble_detected"] == 1
+    assert packs["TG0000000002BB"]["wobble_detected"] is True
 
 
 def test_unit_signals_and_remote_meters():
@@ -149,8 +162,30 @@ def test_unit_signals_and_remote_meters():
 
 
 # ------------------------------------------------------------------ proxy entities
+# [OLD 2026-10-10 (2)] replaced: drove the flag through /pod, which is no longer a flag
+# source. Delete when happy.
+# async def test_pod_health_flag_entity_follows_serial(hass, proxy, make_entry):
+#     proxy.data["/pod"]["PW2_POD_ActiveHeating"] = 1  # belongs to the expansion pack (PW2_name)
+#     entry = make_entry()
+#     assert await hass.config_entries.async_setup(entry.entry_id)
+#     await hass.async_block_till_done()
+#     reg = er.async_get(hass)
+#     exp_id = reg.async_get_entity_id("binary_sensor", DOMAIN, f"{entry.entry_id}_{EXPANSION}_pod_health_pod_active_heating")
+#     bb_id = reg.async_get_entity_id("binary_sensor", DOMAIN, f"{entry.entry_id}_TG0000000002BB_pod_health_pod_active_heating")
+#     for eid in (exp_id, bb_id):
+#         _enable(hass, eid)
+#     await hass.config_entries.async_reload(entry.entry_id)
+#     await hass.async_block_till_done()
+#     assert hass.states.get(exp_id).state == "on"
+#     assert hass.states.get(bb_id).state == "off"
+# [/OLD 2026-10-10 (2)]
 async def test_pod_health_flag_entity_follows_serial(hass, proxy, make_entry):
-    proxy.data["/pod"]["PW2_POD_ActiveHeating"] = 1  # belongs to the expansion pack (PW2_name)
+    vitals = proxy.data["/vitals"]
+    exp_key = next(k for k in vitals if k.startswith("TEPOD") and k.endswith(EXPANSION))
+    bb_key = next(k for k in vitals if k.startswith("TEPOD") and k.endswith("TG0000000002BB"))
+    vitals[exp_key]["POD_ActiveHeating"] = 1
+    vitals[bb_key]["POD_ActiveHeating"] = 0
+    proxy.data["/pod"]["PW2_POD_ActiveHeating"] = 0  # /pod disagrees; vitals win
     entry = make_entry()
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -163,6 +198,39 @@ async def test_pod_health_flag_entity_follows_serial(hass, proxy, make_entry):
     await hass.async_block_till_done()
     assert hass.states.get(exp_id).state == "on"
     assert hass.states.get(bb_id).state == "off"
+
+
+async def test_pod_flags_unknown_when_gateway_does_not_report_them(hass, proxy, setup_entry):
+    """v1r fixture: no POD_* flags in vitals, block flags null -> unknown, never a fake 'off'."""
+    reg = er.async_get(hass)
+    eid = reg.async_get_entity_id(
+        "binary_sensor", DOMAIN, f"{setup_entry.entry_id}_{GATEWAY}_pod_health_pod_permanently_faulted"
+    )
+    assert hass.states.get(eid).state == "unknown"
+
+
+async def test_canned_endpoints_are_not_exposed_on_tedapi(hass, proxy, setup_entry):
+    """v1r proxy: /api/sitemaster, /api/troubleshooting/problems and stub grid_faults are canned."""
+    assert hass.states.get("binary_sensor.pypowerwall_connected_to_tesla") is None
+    assert hass.states.get("sensor.pypowerwall_troubleshooting_problems") is None
+    assert hass.states.get("binary_sensor.pypowerwall_grid_fault") is None
+    assert hass.states.get("sensor.pypowerwall_gateway_started") is None
+
+
+async def test_real_local_api_exposes_sitemaster_and_problems(hass, proxy, make_entry):
+    proxy.data["/health"]["mode"] = "Local"
+    proxy.data["/health"]["tedapi_mode"] = "hybrid"
+    proxy.data["/api/troubleshooting/problems"] = {"problems": ["GridCodeMismatch"]}
+    proxy.data["/api/sitemaster"]["connected_to_tesla"] = False
+    proxy.data["/api/system_status"]["last_toggle_timestamp"] = "2026-09-01T10:00:00Z"
+    proxy.data["/api/system_status"]["grid_faults"] = [{"alert_name": "PINV_a006_vfCheckUnderFrequency"}]
+    entry = make_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    st = hass.states.get("sensor.pypowerwall_troubleshooting_problems")
+    assert st.state == "1" and st.attributes["problems"] == ["GridCodeMismatch"]
+    assert hass.states.get("binary_sensor.pypowerwall_connected_to_tesla").state == "off"
+    assert hass.states.get("binary_sensor.pypowerwall_grid_fault").state == "on"
 
 
 async def test_inverter_power_is_kw(hass, proxy, setup_entry):
@@ -182,6 +250,18 @@ async def test_battery_level_raw_and_app_on_proxy(hass, proxy, setup_entry):
 
 async def test_grid_connected_unknown_without_json(hass, proxy, setup_entry):
     assert hass.states.get("binary_sensor.pypowerwall_grid_connected").state == "on"
+    # [OLD 2026-10-10 (2)] replaced: grid_status endpoint is now the primary source. Delete when happy.
+    # del proxy.data["/json"]
+    # await _refresh(hass, setup_entry)
+    # assert hass.states.get("binary_sensor.pypowerwall_grid_connected").state == "unknown"
+    # [/OLD 2026-10-10 (2)]
+    proxy.data["/json"]["grid_status"] = 0  # /json's coerced value is not trusted over the real state
+    await _refresh(hass, setup_entry)
+    assert hass.states.get("binary_sensor.pypowerwall_grid_connected").state == "on"
+    proxy.data["/api/system_status/grid_status"]["grid_status"] = "SystemIslandedActive"
+    await _refresh(hass, setup_entry)
+    assert hass.states.get("binary_sensor.pypowerwall_grid_connected").state == "off"
+    del proxy.data["/api/system_status/grid_status"]
     del proxy.data["/json"]
     await _refresh(hass, setup_entry)
     assert hass.states.get("binary_sensor.pypowerwall_grid_connected").state == "unknown"

@@ -142,6 +142,12 @@ POD_VITALS_FLAGS = (
 )
 
 
+# /pod fields the proxy / server coerce with int(value or 0): unknown becomes 0
+POD_COERCED_FLAGS = frozenset(
+    {"off_grid", "vf_mode", "wobble_detected", "charge_power_clamped", "backup_ready"}
+)
+
+
 def _serial_of(key: Any) -> str | None:
     if isinstance(key, str) and "--" in key:
         return key.rsplit("--", 1)[-1] or None
@@ -167,8 +173,9 @@ def build_packs(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     block fields (PackageSerialNumber, wobble_detected, backup_ready, ...) but
     by *vitals TEPOD* order for the POD_* fields, and the two orders differ on
     real systems. So POD_* fields are matched by the serial in PWn_name, block
-    fields by PWn_PackageSerialNumber. Precedence: vitals TEPOD > /pod for POD_*,
-    system_status.battery_blocks > /pod for block fields.
+    fields by PWn_PackageSerialNumber. Flags come only from their real sources
+    (vitals TEPOD for POD_*, system_status.battery_blocks for block flags):
+    /pod reports a missing flag as 0, which would read as a genuine "off".
     """
     packs: dict[str, dict[str, Any]] = {}
     ss = data.get("system_status") or {}
@@ -178,20 +185,34 @@ def build_packs(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 {k: v for k, v in block.items() if v is not None}
             )
 
+    # [OLD 2026-10-10 (2)] replaced: /pod turns every missing flag into 0
+    # (int(value or 0)), so on TEDAPI / v1r - where the gateway reports none of
+    # them - all pod health flags read a fabricated "off". /pod is derived only
+    # from system_status + vitals, which are read directly below. Delete when happy.
+    # for group in parse_pod_groups(data.get("pod")):
+    #     block_serial = group.get("PackageSerialNumber")
+    #     if block_serial:
+    #         pack = packs.setdefault(block_serial, {})
+    #         for k, v in group.items():
+    #             if k.startswith("POD_") or k == "name" or v is None:
+    #                 continue
+    #             pack.setdefault(k, v)
+    #     name_serial = _serial_of(group.get("name"))
+    #     if name_serial:
+    #         pack = packs.setdefault(name_serial, {})
+    #         for k, v in group.items():
+    #             if k.startswith("POD_") and v is not None:
+    #                 pack[k] = v
+    # [/OLD 2026-10-10 (2)]
     for group in parse_pod_groups(data.get("pod")):
         block_serial = group.get("PackageSerialNumber")
         if block_serial:
             pack = packs.setdefault(block_serial, {})
             for k, v in group.items():
-                if k.startswith("POD_") or k == "name" or v is None:
+                # only pass-through fields; coerced flags and POD_* are not trusted
+                if k.startswith("POD_") or k in POD_COERCED_FLAGS or k == "name" or v is None:
                     continue
                 pack.setdefault(k, v)
-        name_serial = _serial_of(group.get("name"))
-        if name_serial:
-            pack = packs.setdefault(name_serial, {})
-            for k, v in group.items():
-                if k.startswith("POD_") and v is not None:
-                    pack[k] = v
 
     for key, block in (data.get("vitals") or {}).items():
         if not (isinstance(key, str) and key.startswith("TEPOD") and isinstance(block, dict)):
@@ -306,3 +327,81 @@ def ws_to_wh(value: Any) -> float | None:
     """Watt-seconds -> Wh (remote meter energy counters); 0/None -> None."""
     val = numeric(value)
     return round(val / 3600, 3) if val else None
+
+
+# --------------------------------------------------------------------------- canned data (2026-10-10)
+# pypowerwall serves several /api/* endpoints from hard-coded mock data when it
+# talks to the gateway through TEDAPI (full / v1r) or the Tesla cloud / FleetAPI:
+# /api/sitemaster, /api/troubleshooting/problems, /api/meters/site, ... and
+# pypowerwall-server fabricates /api/sitemaster and /api/troubleshooting/problems.
+MOCK_TEDAPI_MODES = frozenset({"full", "v1r"})
+
+
+def local_api_is_real(health: Any) -> bool:
+    """True only when the backend proxies the gateway's own local /api/* endpoints.
+
+    pypowerwall proxy: mode "Local" with tedapi_mode off / hybrid (hybrid uses
+    the local API for /api/* and TEDAPI only for vitals). Cloud, FleetAPI and
+    TEDAPI full / v1r answer the mocked endpoints with canned data.
+    pypowerwall-server: never (those endpoints are synthesised).
+    """
+    if not isinstance(health, dict) or is_server_health(health):
+        return False
+    mode = str(health.get("mode") or "")
+    if not mode.startswith("Local"):
+        return False
+    return str(health.get("tedapi_mode") or "off") not in MOCK_TEDAPI_MODES
+
+
+# pypowerwall/tedapi/stubs.py _API_SYSTEM_STATUS_TEMPLATE marker
+STUB_SYSTEM_STATUS_TOGGLE = "2023-10-13T04:08:05.957195-07:00"
+# system_status fields the TEDAPI stub fills with constants instead of gateway data
+STUB_SYSTEM_STATUS_FIELDS = frozenset(
+    {
+        "battery_target_power",
+        "battery_target_reactive_power",
+        "instantaneous_max_charge_power",
+        "instantaneous_max_discharge_power",
+        "instantaneous_max_apparent_power",
+        "hardware_capability_charge_power",
+        "hardware_capability_discharge_power",
+        "inverter_nominal_usable_power",
+        "grid_faults",
+        "max_power_energy_remaining",
+        "max_power_energy_to_be_charged",
+        "expected_energy_remaining",
+    }
+)
+
+
+def system_status_is_stub(ss: Any) -> bool:
+    """True when /api/system_status comes from pypowerwall's TEDAPI stub template."""
+    return isinstance(ss, dict) and ss.get("last_toggle_timestamp") == STUB_SYSTEM_STATUS_TOGGLE
+
+
+def system_status_value(d: dict[str, Any], field: str) -> Any:
+    """A system_status field, or None when it is a stub constant."""
+    ss = d.get("system_status") or {}
+    if field in STUB_SYSTEM_STATUS_FIELDS and system_status_is_stub(ss):
+        return None
+    return ss.get(field)
+
+
+def troubleshooting_problems(d: dict[str, Any]) -> list[Any] | None:
+    """Problem list from /api/troubleshooting/problems ({"problems": [...]}), None if canned/unknown."""
+    if not local_api_is_real(d.get("health")):
+        return None
+    t = d.get("troubleshooting")
+    if isinstance(t, dict):
+        t = t.get("problems")
+    return t if isinstance(t, list) else None
+
+
+def connected_to_tesla(d: dict[str, Any]) -> bool | None:
+    """sitemaster.connected_to_tesla, None when /api/sitemaster is canned."""
+    if not local_api_is_real(d.get("health")):
+        return None
+    sm = d.get("sitemaster")
+    if not isinstance(sm, dict) or "connected_to_tesla" not in sm:
+        return None
+    return bool(sm["connected_to_tesla"])

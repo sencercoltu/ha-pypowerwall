@@ -33,6 +33,26 @@ Versions follow the `version` field in `custom_components/pypowerwall/manifest.j
   (disabled by default).
 
 ### Fixed
+- Grid Energy Imported / Exported were stuck: `/api/meters/site` was preferred, but on TEDAPI / v1r
+  pypowerwall answers it with hard-coded mock data (6995.05 kWh imported / 4507.44 kWh exported).
+  The mock is now ignored; order is `/aggregates` (real lifetime counters with pypowerwall ≥ 0.16.5)
+  → a real `/api/meters/site` → the gateway meter's lifetime counters in vitals.
+- Other canned data from pypowerwall is no longer shown as real. On TEDAPI / v1r, cloud and FleetAPI,
+  pypowerwall serves several endpoints from hard-coded mock or stub data, and pypowerwall-server
+  synthesises some:
+  - Connected to Tesla (`/api/sitemaster`, always "connected") and Troubleshooting Problems
+    (`/api/troubleshooting/problems`) are only created when the proxy uses the gateway's local API
+    (mode `Local`, tedapi_mode off / hybrid). Troubleshooting Problems also counted the
+    `{"problems": [...]}` wrapper instead of the list, so it always read 1.
+  - Grid Fault, Battery Target Power, Instantaneous Max Charge/Discharge Power and Inverter Nominal
+    Usable Power are not created (or read unknown) when `/api/system_status` is pypowerwall's TEDAPI
+    stub, whose values are constants (`grid_faults` always empty, powers always 0).
+  - Pod health flags no longer come from `/pod`, which turns every missing flag into 0. They are read
+    from vitals / `battery_blocks` and are unknown when the gateway does not report them.
+  - Gateway Started showed the battery commissioning date on TEDAPI; it is now only set when the
+    gateway reports its uptime.
+  - Grid Connected uses `/api/system_status/grid_status` first; `/json.grid_status` turns a failed
+    gateway call into "disconnected".
 - Pod health flags (Active Heating, Charge Complete, Permanently Faulted, …) were attached to the
   wrong Powerwall: the proxy's `/pod` numbers `POD_*` fields by vitals order but block fields by
   `battery_blocks` order. Flags are now matched by serial.

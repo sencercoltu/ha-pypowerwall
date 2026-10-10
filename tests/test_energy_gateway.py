@@ -15,21 +15,61 @@ from custom_components.pypowerwall.sensor_descriptions import (
 from .conftest import load_fixture
 
 
-async def test_grid_energy_sensors_from_meters_site(hass, proxy, setup_entry):
+# [OLD 2026-10-10] replaced: this asserted pypowerwall's TEDAPI *mock* /api/meters/site
+# values (the fixture is that mock) as the grid counters. Delete this block when happy.
+# async def test_grid_energy_sensors_from_meters_site(hass, proxy, setup_entry):
+#     meters = load_fixture("api_meters_site.json")
+#     site = {
+#         f: sum(m["Cached_readings"][f] for m in meters if m.get("location") == "site")
+#         for f in ("energy_imported", "energy_exported")
+#     }
+#     imp = hass.states.get("sensor.pypowerwall_grid_energy_imported")
+#     exp = hass.states.get("sensor.pypowerwall_grid_energy_exported")
+#     assert imp is not None and exp is not None
+#     # native Wh, displayed in kWh (suggested unit) -> compare in kWh
+#     assert float(imp.state) == pytest.approx(site["energy_imported"] / 1000, rel=1e-6)
+#     assert float(exp.state) == pytest.approx(site["energy_exported"] / 1000, rel=1e-6)
+#     assert imp.attributes["state_class"] == "total_increasing"
+#     assert imp.attributes["device_class"] == "energy"
+#     assert imp.attributes["unit_of_measurement"] == "kWh"
+# [/OLD 2026-10-10]
+async def test_mock_site_meter_is_ignored_and_aggregates_win(hass, proxy, make_entry):
+    """/api/meters/site on TEDAPI/v1r is pypowerwall's canned mock -> never a grid counter."""
     meters = load_fixture("api_meters_site.json")
-    site = {
-        f: sum(m["Cached_readings"][f] for m in meters if m.get("location") == "site")
-        for f in ("energy_imported", "energy_exported")
-    }
+    assert meters[0]["connection"]["device_serial"] == "JBL12345Y1F012synchrometerX"  # the mock
+    proxy.data["/aggregates"]["site"]["energy_imported"] = 1_234_000
+    proxy.data["/aggregates"]["site"]["energy_exported"] = 567_000
+    entry = make_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
     imp = hass.states.get("sensor.pypowerwall_grid_energy_imported")
     exp = hass.states.get("sensor.pypowerwall_grid_energy_exported")
-    assert imp is not None and exp is not None
-    # native Wh, displayed in kWh (suggested unit) -> compare in kWh
-    assert float(imp.state) == pytest.approx(site["energy_imported"] / 1000, rel=1e-6)
-    assert float(exp.state) == pytest.approx(site["energy_exported"] / 1000, rel=1e-6)
+    assert float(imp.state) == pytest.approx(1234.0)  # kWh
+    assert float(exp.state) == pytest.approx(567.0)
     assert imp.attributes["state_class"] == "total_increasing"
     assert imp.attributes["device_class"] == "energy"
     assert imp.attributes["unit_of_measurement"] == "kWh"
+    # counter keeps moving with /aggregates
+    proxy.data["/aggregates"]["site"]["energy_imported"] = 1_235_000
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert float(hass.states.get("sensor.pypowerwall_grid_energy_imported").state) == pytest.approx(1235.0)
+
+
+async def test_real_site_meter_used_when_aggregates_are_zero(hass, proxy, make_entry):
+    for m in proxy.data["/api/meters/site"]:
+        m["connection"]["device_serial"] = "REAL123"
+        m["Cached_readings"]["last_communication_time"] = "2026-10-10T10:00:00Z"
+        m["Cached_readings"]["energy_imported"] = 2_000_000
+    entry = make_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert float(hass.states.get("sensor.pypowerwall_grid_energy_imported").state) == pytest.approx(2000.0)
+
+
+async def test_no_grid_energy_entity_from_mock_only(hass, proxy, setup_entry):
+    """Fixture: aggregates zeroed, meters/site mock, no vitals lifetime counters -> not created."""
+    assert hass.states.get("sensor.pypowerwall_grid_energy_imported") is None
 
 
 async def test_energy_sensors_without_data_are_not_created(hass, proxy, setup_entry):
@@ -55,12 +95,26 @@ async def test_energy_sensors_created_when_aggregates_have_data(hass, proxy, mak
     assert float(hass.states.get("sensor.pypowerwall_home_energy_consumed").state) == pytest.approx(99.0)
 
 
-async def test_energy_zero_mid_run_keeps_last_value_not_reset(hass, proxy, setup_entry):
+# [OLD 2026-10-10] replaced: drove the zero through the (mock) /api/meters/site. Delete when happy.
+# async def test_energy_zero_mid_run_keeps_last_value_not_reset(hass, proxy, setup_entry):
+#     """A transient 0 from the proxy must not reset a TOTAL_INCREASING sensor to 0."""
+#     before = hass.states.get("sensor.pypowerwall_grid_energy_imported").state
+#     for meter in proxy.data["/api/meters/site"]:
+#         meter["Cached_readings"]["energy_imported"] = 0
+#     await setup_entry.runtime_data.coordinator.async_refresh()
+#     await hass.async_block_till_done()
+#     st = hass.states.get("sensor.pypowerwall_grid_energy_imported").state
+#     assert st in ("unknown", before)  # never "0.0"
+# [/OLD 2026-10-10]
+async def test_energy_zero_mid_run_keeps_last_value_not_reset(hass, proxy, make_entry):
     """A transient 0 from the proxy must not reset a TOTAL_INCREASING sensor to 0."""
+    proxy.data["/aggregates"]["site"]["energy_imported"] = 1_234_000
+    entry = make_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
     before = hass.states.get("sensor.pypowerwall_grid_energy_imported").state
-    for meter in proxy.data["/api/meters/site"]:
-        meter["Cached_readings"]["energy_imported"] = 0
-    await setup_entry.runtime_data.coordinator.async_refresh()
+    proxy.data["/aggregates"]["site"]["energy_imported"] = 0
+    await entry.runtime_data.coordinator.async_refresh()
     await hass.async_block_till_done()
     st = hass.states.get("sensor.pypowerwall_grid_energy_imported").state
     assert st in ("unknown", before)  # never "0.0"

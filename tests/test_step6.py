@@ -65,15 +65,51 @@ async def test_proxy_fallback_binary_sensor(hass, proxy, setup_entry):
 
 
 # ------------------------------------------------------- power envelope sensors
+# [OLD 2026-10-10] replaced: asserted the constant 0 of pypowerwall's TEDAPI
+# system_status stub (this fixture is that stub) as real values. Delete when happy.
+# async def test_power_envelope_sensors(hass, proxy, setup_entry):
+#     # battery_target_power is enabled by default; fixture value is 0
+#     st = hass.states.get("sensor.pypowerwall_battery_target_power")
+#     assert st is not None and float(st.state) == 0
+#     # the rest are disabled by default but registered
+#     ent_reg = er.async_get(hass)
+#     for key in ("max_charge_power", "max_discharge_power", "instantaneous_max_charge_power",
+#                 "instantaneous_max_discharge_power", "inverter_nominal_usable_power", "solar_real_power_limit"):
+#         e = ent_reg.async_get(f"sensor.pypowerwall_{key.replace('_', '_')}")
+#         assert e is not None, key
+#         assert e.disabled_by == er.RegistryEntryDisabler.INTEGRATION
+#     # proxy data age is live
+#     age = hass.states.get("sensor.pypowerwall_proxy_data_age")
+#     assert age is not None and float(age.state) >= 0
+#
+#
+# async def test_power_envelope_values_when_firmware_reports_them(hass, proxy, make_entry):
+#     proxy.data["/api/system_status"].update({"max_charge_power": 15000, "max_discharge_power": 21000, "battery_target_power": -3200})
+#     entry = make_entry()
+#     assert await hass.config_entries.async_setup(entry.entry_id)
+#     await hass.async_block_till_done()
+#     ent_reg = er.async_get(hass)
+#     ent_reg.async_update_entity("sensor.pypowerwall_max_charge_power", disabled_by=None)
+#     ent_reg.async_update_entity("sensor.pypowerwall_max_discharge_power", disabled_by=None)
+#     await hass.config_entries.async_reload(entry.entry_id)
+#     await hass.async_block_till_done()
+#     assert float(hass.states.get("sensor.pypowerwall_max_charge_power").state) == 15000
+#     assert float(hass.states.get("sensor.pypowerwall_max_discharge_power").state) == 21000
+#     assert float(hass.states.get("sensor.pypowerwall_battery_target_power").state) == -3200
+# [/OLD 2026-10-10]
+STUB_ONLY = ("battery_target_power", "instantaneous_max_charge_power",
+             "instantaneous_max_discharge_power", "inverter_nominal_usable_power")
+
+
 async def test_power_envelope_sensors(hass, proxy, setup_entry):
-    # battery_target_power is enabled by default; fixture value is 0
-    st = hass.states.get("sensor.pypowerwall_battery_target_power")
-    assert st is not None and float(st.state) == 0
-    # the rest are disabled by default but registered
+    # fixture system_status is pypowerwall's TEDAPI stub -> stub-only sensors are not created
+    assert load_fixture("api_system_status.json")["last_toggle_timestamp"].startswith("2023-10-13")
     ent_reg = er.async_get(hass)
-    for key in ("max_charge_power", "max_discharge_power", "instantaneous_max_charge_power",
-                "instantaneous_max_discharge_power", "inverter_nominal_usable_power", "solar_real_power_limit"):
-        e = ent_reg.async_get(f"sensor.pypowerwall_{key.replace('_', '_')}")
+    for key in STUB_ONLY:
+        assert ent_reg.async_get(f"sensor.pypowerwall_{key}") is None, key
+    # the rest are disabled by default but registered
+    for key in ("max_charge_power", "max_discharge_power", "solar_real_power_limit"):
+        e = ent_reg.async_get(f"sensor.pypowerwall_{key}")
         assert e is not None, key
         assert e.disabled_by == er.RegistryEntryDisabler.INTEGRATION
     # proxy data age is live
@@ -82,7 +118,10 @@ async def test_power_envelope_sensors(hass, proxy, setup_entry):
 
 
 async def test_power_envelope_values_when_firmware_reports_them(hass, proxy, make_entry):
-    proxy.data["/api/system_status"].update({"max_charge_power": 15000, "max_discharge_power": 21000, "battery_target_power": -3200})
+    proxy.data["/api/system_status"].update({
+        "last_toggle_timestamp": "2026-09-01T10:00:00Z",  # a real gateway payload, not the stub
+        "max_charge_power": 15000, "max_discharge_power": 21000, "battery_target_power": -3200,
+    })
     entry = make_entry()
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()

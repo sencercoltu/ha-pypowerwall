@@ -28,7 +28,14 @@ from homeassistant.const import (
 )
 from homeassistant.util import dt as dt_util
 
-from .payload import health_version, soe_app, soe_raw, ws_to_wh  # 2026-10-10
+from .payload import (  # 2026-10-10
+    health_version,
+    soe_app,
+    soe_raw,
+    system_status_value,
+    troubleshooting_problems,
+    ws_to_wh,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +82,68 @@ def _grid_frequency(d: dict) -> float | None:
     return None
 
 
+# [OLD 2026-10-10] replaced: /api/meters/site was preferred over /aggregates, but on
+# TEDAPI / v1r transports pypowerwall answers /api/meters/site with hard-coded MOCK data
+# (energy_imported 6995047.55 Wh, energy_exported 4507438.17 Wh, timestamp 2023-12-16),
+# so Grid Energy Imported/Exported were stuck at those numbers. Delete this block when happy.
+# def _site_meter_energy(d: dict, field: str) -> float | None:
+#     """Sum a lifetime energy field over the site meters in /api/meters/site.
+#
+#     The endpoint returns a list of meters (location 'site'), each with
+#     Cached_readings.energy_imported/exported in Wh.
+#     """
+#     meters = d.get("meters_site")
+#     if not isinstance(meters, list):
+#         return None
+#     total = 0.0
+#     seen = False
+#     for m in meters:
+#         if not isinstance(m, dict) or m.get("location") not in (None, "site"):
+#             continue
+#         v = (m.get("Cached_readings") or {}).get(field)
+#         if v:
+#             total += float(v)
+#             seen = True
+#     return total if seen else None
+#
+#
+# def _energy(section: str, field: str):
+#     """Lifetime energy counter (Wh) for a meter section.
+#
+#     /api/meters/site is authoritative for the site meter; /aggregates carries
+#     the same fields for site/battery/load/solar but is zeroed on some proxy
+#     transports (tedapi/v1r), so a 0 there is treated as 'unknown' and the
+#     entity keeps its last value instead of resetting a TOTAL_INCREASING sensor.
+#     """
+#
+#     def _fn(d: dict) -> float | None:
+#         if section == "site":
+#             v = _site_meter_energy(d, field)
+#             if v:
+#                 return v
+#         v = (d.get("aggregates") or {}).get(section, {}).get(field)
+#         return v if v else None
+#
+#     return _fn
+# [/OLD 2026-10-10]
+# pypowerwall's TEDAPI mock for /api/meters/site (pypowerwall/tedapi/mock_data.py METERS_SITE)
+MOCK_SITE_METER_SERIAL = "JBL12345Y1F012synchrometerX"
+MOCK_SITE_METER_TIME = "2023-12-16T11:48:34"
+
+
+def _is_mock_site_meter(meter: dict) -> bool:
+    """True for pypowerwall's canned /api/meters/site answer (TEDAPI / cloud / FleetAPI modes)."""
+    serial = (meter.get("connection") or {}).get("device_serial")
+    seen = str((meter.get("Cached_readings") or {}).get("last_communication_time") or "")
+    return serial == MOCK_SITE_METER_SERIAL or seen.startswith(MOCK_SITE_METER_TIME)
+
+
 def _site_meter_energy(d: dict, field: str) -> float | None:
-    """Sum a lifetime energy field over the site meters in /api/meters/site.
+    """Sum a lifetime energy field over the *real* site meters in /api/meters/site.
 
     The endpoint returns a list of meters (location 'site'), each with
-    Cached_readings.energy_imported/exported in Wh.
+    Cached_readings.energy_imported/exported in Wh. pypowerwall's mock answer
+    (served on TEDAPI / v1r) is ignored.
     """
     meters = d.get("meters_site")
     if not isinstance(meters, list):
@@ -89,6 +153,8 @@ def _site_meter_energy(d: dict, field: str) -> float | None:
     for m in meters:
         if not isinstance(m, dict) or m.get("location") not in (None, "site"):
             continue
+        if _is_mock_site_meter(m):
+            continue
         v = (m.get("Cached_readings") or {}).get(field)
         if v:
             total += float(v)
@@ -96,22 +162,39 @@ def _site_meter_energy(d: dict, field: str) -> float | None:
     return total if seen else None
 
 
+# Fallback for the grid counters: the gateway's own meter in vitals
+# (TEMSA = Backup Switch meter Z, TESYNC = Backup Gateway 2 site meter X).
+_VITALS_SITE_ENERGY = {
+    "energy_imported": (("TEMSA", "METER_Z_LifetimeEnergyImport"), ("TESYNC", "METER_X_LifetimeEnergyImport")),
+    "energy_exported": (("TEMSA", "METER_Z_LifetimeEnergyExport"), ("TESYNC", "METER_X_LifetimeEnergyExport")),
+}
+
+
+def _vitals_site_energy(d: dict, field: str) -> float | None:
+    for prefix, key in _VITALS_SITE_ENERGY.get(field, ()):
+        for vkey, block in (d.get("vitals") or {}).items():
+            if vkey.startswith(prefix) and isinstance(block, dict) and block.get(key):
+                return float(block[key])
+    return None
+
+
 def _energy(section: str, field: str):
     """Lifetime energy counter (Wh) for a meter section.
 
-    /api/meters/site is authoritative for the site meter; /aggregates carries
-    the same fields for site/battery/load/solar but is zeroed on some proxy
-    transports (tedapi/v1r), so a 0 there is treated as 'unknown' and the
-    entity keeps its last value instead of resetting a TOTAL_INCREASING sensor.
+    Order: /aggregates (pypowerwall >= 0.16.5 fills it from the gateway on
+    TEDAPI too) -> a real (non-mock) /api/meters/site -> for the grid, the
+    gateway meter's lifetime counter in vitals. A 0 / missing value is
+    'unknown', so a TOTAL_INCREASING sensor keeps its last value instead of
+    resetting.
     """
 
     def _fn(d: dict) -> float | None:
-        if section == "site":
-            v = _site_meter_energy(d, field)
-            if v:
-                return v
         v = (d.get("aggregates") or {}).get(section, {}).get(field)
-        return v if v else None
+        if v:
+            return v
+        if section == "site":
+            return _site_meter_energy(d, field) or _vitals_site_energy(d, field)
+        return None
 
     return _fn
 
@@ -351,9 +434,14 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         icon="mdi:wrench",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: len(d.get("troubleshooting") or [])
-        if d.get("troubleshooting") is not None
-        else None,
+        # [OLD 2026-10-10] replaced: the endpoint returns {"problems": [...]}, so len()
+        # of that dict was always 1; and on TEDAPI / cloud / pypowerwall-server the
+        # payload is canned anyway. Delete when happy.
+        # value_fn=lambda d: len(d.get("troubleshooting") or [])
+        # if d.get("troubleshooting") is not None
+        # else None,
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: len(troubleshooting_problems(d)) if troubleshooting_problems(d) is not None else None,
     ),
     # Diagnostics
     PyPowerwallSensorDescription(
@@ -514,7 +602,14 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         icon="mdi:clock-start",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda d: _parse_ts((d.get("gateway_status") or {}).get("start_time")),
+        # [OLD 2026-10-10] replaced: on TEDAPI pypowerwall fills /api/status start_time
+        # with the battery *commissioning date* (up_time_seconds is null there), so this
+        # showed the install date as the gateway start time. Delete when happy.
+        # value_fn=lambda d: _parse_ts((d.get("gateway_status") or {}).get("start_time")),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: _parse_ts((d.get("gateway_status") or {}).get("start_time"))
+        if (d.get("gateway_status") or {}).get("up_time_seconds") is not None
+        else None,
     ),
     # Battery power envelope (system_status). Several of these are null on
     # v1r/older firmwares, so they are disabled by default; enable if populated.
@@ -527,7 +622,10 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         suggested_display_precision=0,
         icon="mdi:battery-sync",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: (d.get("system_status") or {}).get("battery_target_power"),
+        # [OLD 2026-10-10] replaced: constant 0 from pypowerwall's TEDAPI system_status stub. Delete when happy.
+        # value_fn=lambda d: (d.get("system_status") or {}).get("battery_target_power"),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: system_status_value(d, "battery_target_power"),
     ),
     PyPowerwallSensorDescription(
         key="max_charge_power",
@@ -563,7 +661,10 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         icon="mdi:battery-arrow-up",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda d: (d.get("system_status") or {}).get("instantaneous_max_charge_power"),
+        # [OLD 2026-10-10] replaced: constant 0 from pypowerwall's TEDAPI system_status stub. Delete when happy.
+        # value_fn=lambda d: (d.get("system_status") or {}).get("instantaneous_max_charge_power"),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: system_status_value(d, "instantaneous_max_charge_power"),
     ),
     PyPowerwallSensorDescription(
         key="instantaneous_max_discharge_power",
@@ -575,7 +676,10 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         icon="mdi:battery-arrow-down",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda d: (d.get("system_status") or {}).get("instantaneous_max_discharge_power"),
+        # [OLD 2026-10-10] replaced: constant 0 from pypowerwall's TEDAPI system_status stub. Delete when happy.
+        # value_fn=lambda d: (d.get("system_status") or {}).get("instantaneous_max_discharge_power"),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: system_status_value(d, "instantaneous_max_discharge_power"),
     ),
     PyPowerwallSensorDescription(
         key="inverter_nominal_usable_power",
@@ -587,7 +691,10 @@ MAIN_SENSORS: tuple[PyPowerwallSensorDescription, ...] = (
         icon="mdi:sine-wave",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda d: (d.get("system_status") or {}).get("inverter_nominal_usable_power"),
+        # [OLD 2026-10-10] replaced: constant 0 from pypowerwall's TEDAPI system_status stub. Delete when happy.
+        # value_fn=lambda d: (d.get("system_status") or {}).get("inverter_nominal_usable_power"),
+        # [/OLD 2026-10-10]
+        value_fn=lambda d: system_status_value(d, "inverter_nominal_usable_power"),
     ),
     PyPowerwallSensorDescription(
         key="solar_real_power_limit",
